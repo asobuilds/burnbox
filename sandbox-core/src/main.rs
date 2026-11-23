@@ -8,11 +8,19 @@
 //! back to a private directory under `/dev/shm`, which is already kernel
 //! `tmpfs`. In both cases it runs `--target`, scrubs every file with `zeroize`
 //! on exit, and removes/unmounts the workspace.
+//!
+//! Network isolation is requested with `CLONE_NEWNET`. If the host denies that
+//! flag, `online` sessions continue with a stderr warning; `offline` sessions
+//! treat it as a namespace setup failure. A small seccomp-BPF filter is
+//! installed in the target before `execve`.
+
+mod seccomp;
 
 use clap::{Arg, Command};
 use nix::errno::Errno;
 use nix::mount::{mount, umount2, MntFlags, MsFlags};
 use nix::sched::{clone, CloneFlags};
+use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{execvpe, fork, getegid, geteuid, pipe, write as fd_write, ForkResult, Pid};
 use std::ffi::CString;
@@ -131,6 +139,38 @@ fn emit_status(status: &str, pid: Pid, mount_point: &Path) {
     let _ = io::stdout().flush();
 }
 
+/// Clone the namespace supervisor with the requested flag set. Shared by the
+/// first attempt (with `CLONE_NEWNET`) and the degraded retry (without it).
+fn clone_supervisor(
+    session: &Session,
+    child_read: nix::libc::c_int,
+    child_write: nix::libc::c_int,
+    stack: &mut [u8],
+    flags: CloneFlags,
+) -> nix::Result<Pid> {
+    let child_session = session.clone();
+    unsafe {
+        clone(
+            Box::new(move || {
+                // Only the namespace creator (the parent) may write the
+                // uid/gid mapping files. Wait for its signal before mounting.
+                nix::libc::close(child_write);
+                let ready = read_sync_byte(child_read) == Some(b'G');
+                nix::libc::close(child_read);
+                let code = if ready {
+                    run_sandbox(&child_session)
+                } else {
+                    EXIT_SANDBOX
+                };
+                process::exit(code);
+            }),
+            stack,
+            flags,
+            Some(nix::libc::SIGCHLD),
+        )
+    }
+}
+
 fn main() {
     let matches = match build_cli().try_get_matches() {
         Ok(matches) => matches,
@@ -171,39 +211,45 @@ fn main() {
     // parent keeps ownership of its own ends of the pipe.
     let child_read = sync_read.as_raw_fd();
     let child_write = sync_write.as_raw_fd();
-    let child_session = session.clone();
     let mut stack = vec![0u8; SUPERVISOR_STACK];
-    let flags = CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWPID;
+    let base_flags =
+        CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWPID;
+    let network_flags = base_flags | CloneFlags::CLONE_NEWNET;
 
-    let child_pid = unsafe {
-        clone(
-            Box::new(move || {
-                // Only the namespace creator (the parent) may write the
-                // uid/gid mapping files. Wait for its signal before mounting.
-                nix::libc::close(child_write);
-                let ready = read_sync_byte(child_read) == Some(b'G');
-                nix::libc::close(child_read);
-                let code = if ready {
-                    run_sandbox(&child_session)
-                } else {
-                    EXIT_SANDBOX
-                };
-                process::exit(code);
-            }),
-            &mut stack,
-            flags,
-            Some(nix::libc::SIGCHLD),
-        )
-    };
-
-    let child_pid = match child_pid {
+    let child_pid = match clone_supervisor(
+        &session,
+        child_read,
+        child_write,
+        &mut stack,
+        network_flags,
+    ) {
         Ok(pid) => pid,
-        Err(error) => {
-            eprintln!("burnbox-core: namespace clone failed: {error}");
+        Err(error) if session.mode == "offline" => {
+            // Offline sessions promise network isolation, so a missing netns
+            // is a hard namespace setup failure (exit 2).
+            eprintln!("burnbox-core: offline mode requires CLONE_NEWNET: {error}");
             drop(sync_read);
             drop(sync_write);
             let _ = fs::remove_dir_all(&session.mount_point);
             process::exit(EXIT_SANDBOX);
+        }
+        Err(error) => {
+            // Online sessions degrade gracefully on hosts (for example Ubuntu
+            // with AppArmor) that refuse a network namespace to unprivileged
+            // processes. A warning is emitted; the session still runs.
+            eprintln!(
+                "burnbox-core: warning: CLONE_NEWNET unavailable ({error}); continuing without network isolation"
+            );
+            match clone_supervisor(&session, child_read, child_write, &mut stack, base_flags) {
+                Ok(pid) => pid,
+                Err(error) => {
+                    eprintln!("burnbox-core: namespace clone failed: {error}");
+                    drop(sync_read);
+                    drop(sync_write);
+                    let _ = fs::remove_dir_all(&session.mount_point);
+                    process::exit(EXIT_SANDBOX);
+                }
+            }
         }
     };
 
@@ -408,8 +454,16 @@ fn run_sandbox(session: &Session) -> i32 {
         return EXIT_SECURITY;
     }
 
-    match target_status {
+    session_exit_code(target_status)
+}
+
+/// Map the target's terminal status to the AGREEMENT.md exit contract.
+fn session_exit_code(status: Option<WaitStatus>) -> i32 {
+    match status {
         Some(WaitStatus::Exited(_, EXIT_CLEAN)) => EXIT_CLEAN,
+        // SIGSYS means the target tripped the seccomp filter: a security
+        // violation, not a generic runtime error.
+        Some(WaitStatus::Signaled(_, Signal::SIGSYS, _)) => EXIT_SECURITY,
         _ => EXIT_RUNTIME,
     }
 }
@@ -462,6 +516,13 @@ fn exec_target(session: &Session) -> ! {
                 process::exit(EXIT_RUNTIME);
             }
         }
+    }
+
+    // Namespace/mount setup is complete; lock the target down before exec.
+    // A failure here is a security violation: never run the target unfiltered.
+    if let Err(error) = seccomp::install() {
+        eprintln!("burnbox-core: seccomp filter installation failed: {error}");
+        process::exit(EXIT_SECURITY);
     }
 
     match execvpe(&target, &argv, &build_environment(session)) {
@@ -626,6 +687,24 @@ mod tests {
         cleanup_mounts(&session, false, false).expect("fallback cleanup");
 
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn seccomp_termination_maps_to_security_exit() {
+        let pid = Pid::from_raw(1);
+        assert_eq!(session_exit_code(None), EXIT_RUNTIME);
+        assert_eq!(
+            session_exit_code(Some(WaitStatus::Exited(pid, EXIT_CLEAN))),
+            EXIT_CLEAN
+        );
+        assert_eq!(
+            session_exit_code(Some(WaitStatus::Exited(pid, 7))),
+            EXIT_RUNTIME
+        );
+        assert_eq!(
+            session_exit_code(Some(WaitStatus::Signaled(pid, Signal::SIGSYS, false))),
+            EXIT_SECURITY
+        );
     }
 
     #[test]
