@@ -1,23 +1,43 @@
-# Agent Directives & Role Boundaries
+# AGENTS.md — BurnBox Multi-Agent Governance
 
-## Mandatory Startup Protocol
-Before reading code or executing commands, every agent MUST:
-1. Read `AGREEMENT.md` to check active file locks and interface contracts.
-2. Read `RESOLUTION.md` to check active errors, blockers, or rollback rules.
-3. Run `git status` to verify the workspace state.
+Two autonomous agents build this repo **concurrently** in split terminals inside
+`~/projects/burnbox`. Strict domain ownership prevents write clashes.
 
-## Strict Domain Ownership (Zero-Overlap Rule)
-- **Agent A — OpenCode (Systems & Security Engineer):**
-  - **Allowed Write Paths:** `sandbox-core/**` (Rust crates, Cargo.toml, namespace/seccomp/tmpfs logic).
-  - **Read-Only Paths:** `cmd/**`, `internal/**`, `go.mod`.
-- **Agent B — Gemini CLI (Orchestrator & UX Engineer):**
-  - **Allowed Write Paths:** `cmd/**`, `internal/**`, `go.mod`, `scripts/**`, `packaging/**`.
-  - **Read-Only Paths:** `sandbox-core/**`.
-- **Shared Governance Files:** `AGREEMENT.md` and `RESOLUTION.md` may be appended to by either agent using atomic section updates, never overwriting another agent's active entry.
+## Roles & write scopes
+| Agent | Role | Exclusive write scope |
+|-------|------|-----------------------|
+| **A — OpenCode** | Systems & Security Engineer | `sandbox-core/**` |
+| **B — Gemini CLI** | Orchestrator & UX Engineer | `cmd/**`, `internal/**`, `go.mod`, `scripts/**`, `packaging/**` |
+| **Director / Architect** | Product + coordination | root governance (`AGENTS.md`, `AGREEMENT.md`, `RESOLUTION.md`), `README.md`, `.gitignore` |
 
-## Environment Constraint
-- The host user (`student`) does not have `sudo` privileges. All sandboxing in `sandbox-core` MUST use **Linux Unprivileged User Namespaces** (`CLONE_NEWUSER`) combined with `CLONE_NEWNS` and `CLONE_NEWPID` so no root privileges are required at runtime.
+`bin/burnbox-core` is produced by Agent A (`cp target/release/...`); `bin/burnbox` by
+Agent B (`go build -o`). `bin/` and `target/` are gitignored — never commit binaries.
 
-## Build & Verification Commands
-- **Go Verification:** `go test ./... && go build -o bin/burnbox ./cmd/burnbox`
-- **Rust Verification:** `cd sandbox-core && cargo clippy && cargo test && cargo build --release && cp target/release/burnbox-core ../bin/`
+## Startup protocol (every session)
+1. Read `AGREEMENT.md` (CLI/JSON contract, **Amendment v1.1**), `RESOLUTION.md` (concurrency + host incidents), and this file.
+2. Touch **only** your scope. Never edit the other agent's files or governance/README.
+3. Respect host constraints: **no sudo**, AppArmor `unprivileged_userns` (tmpfs `mount` denied ⇒ `/dev/shm` fallback), `CLONE_NEWNET` allowed, `Xephyr` present.
+4. Run your verification block; commit with your prefix (`opencode:` / `go:`) only when green.
+
+## Verification commands
+**Agent A (Rust):**
+cd sandbox-core && cargo clippy --all-targets -- -D warnings && cargo test && cargo build --release && cp target/release/burnbox-core ../bin/
+
+**Agent B (Go):**
+go test ./... && go build -o bin/burnbox ./cmd/burnbox
+
+## Shared contract (authoritative copy in AGREEMENT.md)
+- `--target` MUST be an executable path; viewer args go after `--`. Never pass a raw URL/file as `--target`.
+- `--copy-in <host_path>` (repeatable) stages files **inside** the RAM workspace (mode `0600`) before exec; they fall within the `zeroize` scrub.
+- Stdout = exactly two JSON lines (`started`, `wiped`); all diagnostics on stderr.
+- Exit codes: `0` clean · `1` runtime · `2` namespace/setup · `3` seccomp.
+
+## Concurrency rules (see RESOLUTION.md)
+- File-lock table governs shared paths; `bin/` writes are serialized by build order (Rust first publishes `burnbox-core`, then Go runs E2E against it).
+- Host incidents (AppArmor `EACCES` fallback; stale-`/sys` netns caveat ⇒ `if_nameindex()`/`/proc/net/dev` authoritative) are logged in `RESOLUTION.md` and must not be "fixed" by re-introducing privileged mounts.
+
+## Milestone status
+- [x] M1 Go orchestrator MVP
+- [x] M2 Rust namespace + RAM zero-wipe core
+- [x] M3 Offline `CLONE_NEWNET` assertion · Seccomp-BPF · `--copy-in` staging · smart URL/file routing · Xephyr display isolation
+- [ ] M4 Desktop integration + packaging
