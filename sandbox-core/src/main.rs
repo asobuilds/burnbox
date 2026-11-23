@@ -1,9 +1,13 @@
 //! burnbox-core — unprivileged namespace sandbox and RAM wipe engine.
 //!
 //! Creates an unprivileged user namespace (`CLONE_NEWUSER`), a mount namespace
-//! (`CLONE_NEWNS`) and a PID namespace (`CLONE_NEWPID`), mounts a `tmpfs` RAM
-//! directory sized with `--ram-mb`, hides the host `/home` behind an empty
-//! `tmpfs`, runs `--target`, then scrubs and unmounts everything on exit.
+//! (`CLONE_NEWNS`) and a PID namespace (`CLONE_NEWPID`). It mounts a `tmpfs`
+//! RAM directory sized with `--ram-mb` and hides the host `/home` behind an
+//! empty `tmpfs`. If the host LSM (for example Ubuntu's AppArmor
+//! `unprivileged_userns` profile) denies those mounts with `EACCES`, it falls
+//! back to a private directory under `/dev/shm`, which is already kernel
+//! `tmpfs`. In both cases it runs `--target`, scrubs every file with `zeroize`
+//! on exit, and removes/unmounts the workspace.
 
 use clap::{Arg, Command};
 use nix::errno::Errno;
@@ -16,9 +20,9 @@ use std::fs::{self, File, OpenOptions};
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
+use std::os::unix::fs::DirBuilderExt;
 use std::path::{Path, PathBuf};
 use std::process;
-use std::time::{SystemTime, UNIX_EPOCH};
 use zeroize::Zeroize;
 
 /// Session ended cleanly and tmpfs was scrubbed/unmounted.
@@ -98,14 +102,18 @@ fn session_from_matches(matches: &clap::ArgMatches, mount_point: PathBuf) -> Ses
     }
 }
 
-/// Generate a private mount-point path in the system temp directory.
+/// Generate the workspace path. It serves both as the private tmpfs mount
+/// point and, if mounting is denied, as the fallback RAM directory: `/dev/shm`
+/// is kernel tmpfs and is writable by unprivileged users.
 fn make_mount_point() -> PathBuf {
-    let pid = process::id();
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    std::env::temp_dir().join(format!("burnbox-{pid}-{nanos:x}"))
+    Path::new("/dev/shm").join(format!("burnbox-{}", process::id()))
+}
+
+/// Create the workspace privately (mode 0700) for the current user.
+fn create_workspace(path: &Path) -> io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true).mode(0o700);
+    builder.create(path)
 }
 
 /// Build a status line with the exact key order/spacing required by AGREEMENT.md.
@@ -141,8 +149,8 @@ fn main() {
     let host_gid = getegid().as_raw();
     let session = session_from_matches(&matches, make_mount_point());
 
-    if let Err(error) = fs::create_dir_all(&session.mount_point) {
-        eprintln!("burnbox-core: cannot create RAM mount point: {error}");
+    if let Err(error) = create_workspace(&session.mount_point) {
+        eprintln!("burnbox-core: cannot create RAM workspace: {error}");
         process::exit(EXIT_SANDBOX);
     }
 
@@ -222,8 +230,10 @@ fn main() {
         }
     };
 
-    if let Err(error) = fs::remove_dir_all(&session.mount_point) {
-        eprintln!("burnbox-core: cannot remove RAM mount point: {error}");
+    match fs::remove_dir_all(&session.mount_point) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => eprintln!("burnbox-core: cannot remove RAM workspace: {error}"),
     }
     emit_status("wiped", child_pid, &session.mount_point);
 
@@ -292,19 +302,32 @@ fn write_proc_file(path: &str, value: &str) -> io::Result<()> {
 /// The parent has already installed the uid/gid maps before this function runs.
 fn run_sandbox(session: &Session) -> i32 {
     let ram_options = format!("size={}m,mode=1777", session.ram_mb);
-    if let Err(error) = mount(
+    let mut ram_mounted = false;
+    match mount(
         Some("tmpfs"),
         &session.mount_point,
         Some("tmpfs"),
         MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
         Some(ram_options.as_str()),
     ) {
-        eprintln!("burnbox-core: tmpfs mount failed: {error}");
-        return EXIT_SANDBOX;
+        Ok(()) => ram_mounted = true,
+        Err(Errno::EACCES) => {
+            // Ubuntu confines unprivileged user namespaces with AppArmor and
+            // denies mount(2) inside them. The workspace itself is already on
+            // kernel tmpfs, so use it directly instead of failing the session.
+            eprintln!(
+                "burnbox-core: tmpfs mount denied by host policy; using /dev/shm RAM workspace fallback"
+            );
+        }
+        Err(error) => {
+            eprintln!("burnbox-core: tmpfs mount failed: {error}");
+            return EXIT_SANDBOX;
+        }
     }
-    let ram_mounted = true;
 
-    // Fail closed: if /home cannot be hidden, the session must not start.
+    // With a mount-based workspace, failing to hide /home is a security
+    // violation. In the /dev/shm fallback the host LSM blocks all mount
+    // attempts, so HOME is redirected to the isolated workspace instead.
     let mut home_mounted = false;
     match fs::symlink_metadata("/home") {
         Ok(metadata) if metadata.file_type().is_dir() => {
@@ -316,6 +339,9 @@ fn run_sandbox(session: &Session) -> i32 {
                 Some("size=1m,mode=1777"),
             ) {
                 Ok(()) => home_mounted = true,
+                Err(Errno::EACCES) if !ram_mounted => {
+                    eprintln!("burnbox-core: /home overlay denied by host policy; HOME points at the isolated workspace");
+                }
                 Err(error) => {
                     eprintln!("burnbox-core: cannot hide host /home: {error}");
                     let _ = cleanup_mounts(session, ram_mounted, home_mounted);
@@ -325,13 +351,17 @@ fn run_sandbox(session: &Session) -> i32 {
         }
         Ok(_) => {
             eprintln!("burnbox-core: /home is not a directory; cannot hide host home");
-            let _ = cleanup_mounts(session, ram_mounted, home_mounted);
-            return EXIT_SECURITY;
+            if ram_mounted {
+                let _ = cleanup_mounts(session, ram_mounted, home_mounted);
+                return EXIT_SECURITY;
+            }
         }
         Err(error) => {
             eprintln!("burnbox-core: cannot inspect /home: {error}");
-            let _ = cleanup_mounts(session, ram_mounted, home_mounted);
-            return EXIT_SECURITY;
+            if ram_mounted {
+                let _ = cleanup_mounts(session, ram_mounted, home_mounted);
+                return EXIT_SECURITY;
+            }
         }
     }
 
@@ -384,6 +414,35 @@ fn run_sandbox(session: &Session) -> i32 {
     }
 }
 
+/// Build an explicit environment that points HOME and TMPDIR at the RAM
+/// workspace without mutating global state after clone/fork.
+fn build_environment(session: &Session) -> Vec<CString> {
+    let mut environment = Vec::new();
+    for (key, value) in std::env::vars_os() {
+        if key == "HOME" || key == "TMPDIR" || key == "BURNBOX_MODE" {
+            continue;
+        }
+        let mut entry = key.as_bytes().to_vec();
+        entry.push(b'=');
+        entry.extend_from_slice(value.as_bytes());
+        if let Ok(entry) = CString::new(entry) {
+            environment.push(entry);
+        }
+    }
+    let workspace = session.mount_point.display();
+    environment.push(
+        CString::new(format!("HOME={workspace}")).expect("workspace path cannot contain NUL"),
+    );
+    environment.push(
+        CString::new(format!("TMPDIR={workspace}")).expect("workspace path cannot contain NUL"),
+    );
+    environment.push(
+        CString::new(format!("BURNBOX_MODE={}", session.mode))
+            .expect("mode cannot contain NUL"),
+    );
+    environment
+}
+
 /// Replace the grandchild process with the user's target executable.
 fn exec_target(session: &Session) -> ! {
     let target = match CString::new(session.target.as_str()) {
@@ -405,30 +464,7 @@ fn exec_target(session: &Session) -> ! {
         }
     }
 
-    // Pass an explicit environment so TMPDIR points at the RAM directory and
-    // the session mode is visible to the target without mutating global state.
-    let mut environment = Vec::new();
-    for (key, value) in std::env::vars_os() {
-        if key == "TMPDIR" || key == "BURNBOX_MODE" {
-            continue;
-        }
-        let mut entry = key.as_bytes().to_vec();
-        entry.push(b'=');
-        entry.extend_from_slice(value.as_bytes());
-        if let Ok(entry) = CString::new(entry) {
-            environment.push(entry);
-        }
-    }
-    environment.push(
-        CString::new(format!("TMPDIR={}", session.mount_point.display()))
-            .expect("mount point cannot contain NUL"),
-    );
-    environment.push(
-        CString::new(format!("BURNBOX_MODE={}", session.mode))
-            .expect("mode cannot contain NUL"),
-    );
-
-    match execvpe(&target, &argv, &environment) {
+    match execvpe(&target, &argv, &build_environment(session)) {
         Err(error) => {
             eprintln!("burnbox-core: cannot execute {}: {error}", session.target);
             process::exit(EXIT_RUNTIME);
@@ -437,18 +473,26 @@ fn exec_target(session: &Session) -> ! {
     }
 }
 
-/// Overwrite every file in the RAM directory with zeros, then unmount it and
-/// the `/home` overlay. Mounts live only in this namespace; `MNT_DETACH` makes
-/// unmounting robust even if the target left files open.
+/// Overwrite every file in the RAM workspace with zeros, then unmount it (or
+/// remove the `/dev/shm` fallback directory) and the `/home` overlay. Mounts
+/// live only in this namespace; `MNT_DETACH` makes unmounting robust even if
+/// the target left files open.
 fn cleanup_mounts(session: &Session, ram_mounted: bool, home_mounted: bool) -> Result<(), String> {
     let mut errors = Vec::new();
 
+    if let Err(error) = zero_tree(&session.mount_point) {
+        errors.push(format!("RAM wipe: {error}"));
+    }
     if ram_mounted {
-        if let Err(error) = zero_tree(&session.mount_point) {
-            errors.push(format!("RAM wipe: {error}"));
-        }
         if let Err(error) = umount2(&session.mount_point, MntFlags::MNT_DETACH) {
             errors.push(format!("RAM unmount: {error}"));
+        }
+    } else {
+        // /dev/shm fallback: no mount to detach, remove the private directory.
+        match fs::remove_dir_all(&session.mount_point) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => errors.push(format!("RAM workspace removal: {error}")),
         }
     }
     if home_mounted
@@ -536,6 +580,52 @@ mod tests {
         assert_eq!(session.ram_mb, 64);
         assert_eq!(session.target, "/bin/sh");
         assert_eq!(session.target_args, vec!["-c", "echo hello"]);
+    }
+
+    #[test]
+    fn workspace_lives_in_dev_shm() {
+        let path = make_mount_point();
+        assert_eq!(path.parent(), Some(Path::new("/dev/shm")));
+        assert!(path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("burnbox-")));
+    }
+
+    #[test]
+    fn environment_redirects_home_and_tmpdir() {
+        let session = Session {
+            mode: "offline".to_string(),
+            ram_mb: 16,
+            target: "/bin/true".to_string(),
+            target_args: Vec::new(),
+            mount_point: PathBuf::from("/dev/shm/burnbox-42"),
+        };
+        let environment = build_environment(&session);
+        assert!(environment
+            .iter()
+            .any(|entry| entry.as_bytes() == b"HOME=/dev/shm/burnbox-42"));
+        assert!(environment
+            .iter()
+            .any(|entry| entry.as_bytes() == b"TMPDIR=/dev/shm/burnbox-42"));
+    }
+
+    #[test]
+    fn fallback_cleanup_wipes_and_removes_workspace() {
+        let root = std::env::temp_dir().join(format!("burnbox-fallback-test-{}", process::id()));
+        fs::create_dir_all(&root).expect("create test workspace");
+        fs::write(root.join("secret.txt"), b"topsecret").expect("write test secret");
+        let session = Session {
+            mode: "online".to_string(),
+            ram_mb: 16,
+            target: "/bin/true".to_string(),
+            target_args: Vec::new(),
+            mount_point: root.clone(),
+        };
+
+        cleanup_mounts(&session, false, false).expect("fallback cleanup");
+
+        assert!(!root.exists());
     }
 
     #[test]
