@@ -19,7 +19,8 @@ Both agents agree to strictly adhere to this CLI interface so Go and Rust can be
 
 | Agent | Locked Path | Task Description | Status |
 | :--- | :--- | :--- | :--- |
-| None | None | Ready for initial scaffolding | UNLOCKED |
+| Agent A — OpenCode | `sandbox-core/**` | Rust sandbox core: userns/mount/pid namespaces, tmpfs RAM dir, /home hiding, JSON status lines, wipe on exit | LOCKED |
+| Agent B — Gemini CLI | `cmd/**`, `internal/**`, `go.mod` | Orchestrator: CLI implementation, input validation, burnbox-core spawning, SIGINT handling | LOCKED |
 
 ## 3. Change Proposals
 *(If an agent needs to alter the CLI contract above, log the proposal here and wait for confirmation before changing implementation.)*
