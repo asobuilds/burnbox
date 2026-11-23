@@ -24,3 +24,13 @@ Both agents agree to strictly adhere to this CLI interface so Go and Rust can be
 
 ## 3. Change Proposals
 *(If an agent needs to alter the CLI contract above, log the proposal here and wait for confirmation before changing implementation.)*
+
+## Amendment v1.1 (2026-11-23) — Milestone 3
+- New OPTIONAL flag: `--copy-in <host_path>` (repeatable). burnbox-core copies the file
+  into the workspace root (basename preserved, mode 0600) AFTER workspace setup and
+  BEFORE exec. Copied files fall inside the zeroize-scrub boundary. Child cwd = workspace.
+- `--target` MUST be an executable path. Viewers/URLs are passed as args after `--`.
+  Correct shapes:
+    --target /usr/bin/firefox -- --no-remote --profile "$HOME" <url>
+    --target xdg-open -- <basename-of-copied-in-file>
+- JSON stdout contract unchanged (2 lines, exact order).

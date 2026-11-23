@@ -21,3 +21,7 @@
 - **Change:** An `EACCES` from the private `tmpfs` mount now triggers an automatic fallback to a private, mode-0700 directory at `/dev/shm/burnbox-<pid>` (kernel tmpfs, no mount required). `HOME` and `TMPDIR` are redirected there, the target runs inside the same user/mount/PID namespaces, all files are overwritten with `zeroize`-backed zero buffers on exit, and the directory is removed. A successful target now exits `0`.
 - **Verification:** `cargo clippy --all-targets -- -D warnings`, 6 unit tests, and `cargo build --release` pass. End-to-end run on this host emitted the exact `started`/`wiped` JSON lines, showed `HOME`/`TMPDIR` pointing at `/dev/shm/burnbox-<pid>`, wrote and then wiped a test file, left no workspace behind, and returned exit `0`. Nonzero target exits still map to `1` after cleanup.
 - **Note:** When mounts are denied, the `/home` overlay is also skipped (logged to stderr); host `/home` remains visible to the target in that degraded mode, but its home directory is the isolated RAM workspace.
+- 2026-11-23: Go staged files in /dev/shm outside scrubbed workspace (zero-persistence
+  leak) + passed raw URLs as --target (exec contract violation). Resolved via AGREEMENT.md
+  Amendment v1.1: --copy-in moves staging authority into burnbox-core; Go wraps viewers.
+  CLONE_NEWNET confirmed permitted unprivileged; Xephyr probe pending Wayland check.
