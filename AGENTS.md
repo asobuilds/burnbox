@@ -41,3 +41,8 @@ go test ./... && go build -o bin/burnbox ./cmd/burnbox
 - [x] M2 Rust namespace + RAM zero-wipe core
 - [x] M3 Offline `CLONE_NEWNET` assertion · Seccomp-BPF · `--copy-in` staging · smart URL/file routing · Xephyr display isolation
 - [ ] M4 Desktop integration + packaging
+
+## Milestone 4 status (2026-11-23) — shipped
+- Agent B delivered `scripts/install.sh` (user-space `~/.local/bin` + `xdg-mime`, no sudo) and the `cmd/burnbox/main.go` banner.
+- Agent A re-verified `sandbox-core` and republished `../bin/burnbox-core`.
+- Stray root-level `burnbox` binary de-tracked; `/burnbox` added to `.gitignore`.

@@ -25,3 +25,4 @@
   leak) + passed raw URLs as --target (exec contract violation). Resolved via AGREEMENT.md
   Amendment v1.1: --copy-in moves staging authority into burnbox-core; Go wraps viewers.
   CLONE_NEWNET confirmed permitted unprivileged; Xephyr probe pending Wayland check.
+- 2026-11-23 (M4): Packaging moved fully user-space via scripts/install.sh (no sudo, ~/.local/bin, xdg-mime). Xephyr probed with soft fallback. Stray root binary de-tracked.
