@@ -13,7 +13,13 @@ A network namespace (`CLONE_NEWNET`) is requested in the same call:
   - `online`: a warning is written to **stderr** and the session is retried
     without `CLONE_NEWNET`. The target still runs; no crash.
   - `offline`: network isolation is mandatory, so the session fails as a
-    namespace setup error (exit code `2`) with no target execution.
+    namespace setup error (exit code `2`) with no target execution. It also
+    asserts isolation after clone by reading `/sys/class/net` and the
+    netns-authoritative `/proc/net/dev`: only `lo` (up or down) may appear;
+    any external interface or an unreadable source aborts setup with exit
+    code `2`. On hosts where `/sys` is shared with the container, sysfs can
+    list stale host devices; those are warned about on stderr but the
+    authoritative netns view decides the assertion.
 
 The parent process (the namespace creator) writes `uid_map`/`gid_map` and
 signals the supervisor through a pipe before any mount happens.
@@ -28,6 +34,16 @@ case the workspace directory itself is used directly (mode `0700`), `HOME` and
 `TMPDIR` are redirected to it, and the `/home` overlay is skipped with a
 warning. On exit every file is overwritten with a `zeroize`-scrubbed zero buffer
 and the directory is removed (or the tmpfs is unmounted).
+
+## Staging files with `--copy-in`
+
+`--copy-in <host_path>` may be repeated. After workspace/mount setup but before
+`execve`, each file is copied into the workspace root with its basename
+preserved and mode `0600` (exclusive creation; duplicate basenames or unreadable
+sources fail the session with exit `1`). The target's cwd (and `PWD`) is the
+workspace, so `xdg-open <basename>` resolves the staged file. Because staged
+files live inside the workspace, the normal exit scrub walks them, overwrites
+their contents with zeros, and removes them.
 
 ## Seccomp-BPF
 

@@ -11,8 +11,11 @@
 //!
 //! Network isolation is requested with `CLONE_NEWNET`. If the host denies that
 //! flag, `online` sessions continue with a stderr warning; `offline` sessions
-//! treat it as a namespace setup failure. A small seccomp-BPF filter is
-//! installed in the target before `execve`.
+//! treat it as a namespace setup failure and additionally assert that no
+//! external interface is visible in `/sys/class/net`. A small seccomp-BPF
+//! filter is installed in the target before `execve`. Optional `--copy-in`
+//! files are staged into the RAM workspace (mode 0600) with the target's cwd
+//! set there, so they are inside the zeroize scrub boundary.
 
 mod seccomp;
 
@@ -22,13 +25,15 @@ use nix::mount::{mount, umount2, MntFlags, MsFlags};
 use nix::sched::{clone, CloneFlags};
 use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
-use nix::unistd::{execvpe, fork, getegid, geteuid, pipe, write as fd_write, ForkResult, Pid};
-use std::ffi::CString;
-use std::fs::{self, File, OpenOptions};
+use nix::unistd::{
+    chdir, execvpe, fork, getegid, geteuid, pipe, write as fd_write, ForkResult, Pid,
+};
+use std::ffi::{CString, OsStr};
+use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
 use std::os::fd::AsRawFd;
 use std::os::unix::ffi::OsStrExt;
-use std::os::unix::fs::DirBuilderExt;
+use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process;
 use zeroize::Zeroize;
@@ -53,6 +58,8 @@ struct Session {
     ram_mb: u64,
     target: String,
     target_args: Vec<String>,
+    /// Host paths staged into the RAM workspace before exec (basename kept).
+    copy_in: Vec<String>,
     mount_point: PathBuf,
 }
 
@@ -81,6 +88,14 @@ fn build_cli() -> Command {
                 .help("Executable to run inside the sandbox"),
         )
         .arg(
+            Arg::new("copy-in")
+                .long("copy-in")
+                .action(clap::ArgAction::Append)
+                .value_name("HOST_PATH")
+                .allow_hyphen_values(true)
+                .help("Copy a host file into the RAM workspace (repeatable; basename preserved, mode 0600)"),
+        )
+        .arg(
             Arg::new("target-args")
                 .num_args(0..)
                 .trailing_var_arg(true)
@@ -106,6 +121,10 @@ fn session_from_matches(matches: &clap::ArgMatches, mount_point: PathBuf) -> Ses
             .get_many::<String>("target-args")
             .map(|values| values.cloned().collect())
             .unwrap_or_default(),
+        copy_in: matches
+            .get_many::<String>("copy-in")
+            .map(|values| values.cloned().collect())
+            .unwrap_or_default(),
         mount_point,
     }
 }
@@ -122,6 +141,94 @@ fn create_workspace(path: &Path) -> io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true).mode(0o700);
     builder.create(path)
+}
+
+/// Stage each `--copy-in` host file into the RAM workspace. Only the basename
+/// is kept, creation is exclusive with mode 0600, and the copy is flushed.
+/// This runs inside the namespace after any tmpfs mount, so staged files live
+/// in the workspace and are covered by the `zero_tree` scrub on exit.
+fn copy_in_files(session: &Session) -> io::Result<()> {
+    for host_path in &session.copy_in {
+        let source = Path::new(host_path);
+        let basename = source.file_name().ok_or_else(|| {
+            io::Error::other(format!("--copy-in path has no file name: {host_path}"))
+        })?;
+        let mut input = File::open(source)
+            .map_err(|error| io::Error::other(format!("--copy-in {host_path}: {error}")))?;
+        let destination = session.mount_point.join(basename);
+        let mut output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&destination)
+            .map_err(|error| {
+                io::Error::other(format!(
+                    "--copy-in destination {}: {error}",
+                    destination.display()
+                ))
+            })?;
+        // umask can only remove bits; set the exact contract mode explicitly.
+        output.set_permissions(Permissions::from_mode(0o600))?;
+        io::copy(&mut input, &mut output)?;
+        output.sync_all()?;
+    }
+    Ok(())
+}
+
+/// Names visible in `/sys/class/net` other than the loopback device.
+fn external_interfaces<I, S>(names: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    names
+        .into_iter()
+        .map(|name| name.as_ref().to_string_lossy().into_owned())
+        .filter(|name| name != "lo")
+        .collect()
+}
+
+/// Interface names from `/proc/net/dev`, which is virtualized per network
+/// namespace (unlike `/sys` on hosts whose sysfs is shared with the container).
+fn interfaces_from_proc_net_dev(text: &str) -> Vec<String> {
+    text.lines()
+        .skip(2) // two header lines
+        .filter_map(|line| {
+            let (name, _) = line.split_once(':')?;
+            let name = name.trim();
+            (!name.is_empty()).then(|| name.to_string())
+        })
+        .collect()
+}
+
+/// Offline sessions must not see any host interface. `lo` may be up or down;
+/// either is acceptable. `/sys/class/net` is inspected as requested, but the
+/// decision uses `/proc/net/dev`: in containers with a host-shared sysfs the
+/// sysfs entries are stale and can list devices absent from the real netns.
+fn verify_offline_network() -> Result<(), String> {
+    let entries = fs::read_dir("/sys/class/net")
+        .map_err(|error| format!("cannot inspect /sys/class/net: {error}"))?;
+    let names = entries
+        .map(|entry| entry.map(|entry| entry.file_name()))
+        .collect::<io::Result<Vec<_>>>()
+        .map_err(|error| format!("cannot read /sys/class/net: {error}"))?;
+    let sys_external = external_interfaces(names);
+
+    let proc_text = fs::read_to_string("/proc/net/dev")
+        .map_err(|error| format!("cannot inspect /proc/net/dev: {error}"))?;
+    let external = external_interfaces(interfaces_from_proc_net_dev(&proc_text));
+
+    if !sys_external.is_empty() && external.is_empty() {
+        eprintln!(
+            "burnbox-core: warning: /sys/class/net lists stale host interfaces ({}) but the network namespace is loopback-only",
+            sys_external.join(", ")
+        );
+    }
+    if external.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("external interfaces visible: {}", external.join(", ")))
+    }
 }
 
 /// Build a status line with the exact key order/spacing required by AGREEMENT.md.
@@ -347,6 +454,15 @@ fn write_proc_file(path: &str, value: &str) -> io::Result<()> {
 /// Supervisor running inside the new user, mount and PID namespaces.
 /// The parent has already installed the uid/gid maps before this function runs.
 fn run_sandbox(session: &Session) -> i32 {
+    // Hard assertion for offline sessions: CLONE_NEWNET was granted, but the
+    // kernel must actually show an isolated network (loopback only).
+    if session.mode == "offline"
+        && let Err(error) = verify_offline_network()
+    {
+        eprintln!("burnbox-core: offline network isolation assertion failed: {error}");
+        return EXIT_SANDBOX;
+    }
+
     let ram_options = format!("size={}m,mode=1777", session.ram_mb);
     let mut ram_mounted = false;
     match mount(
@@ -409,6 +525,14 @@ fn run_sandbox(session: &Session) -> i32 {
                 return EXIT_SECURITY;
             }
         }
+    }
+
+    // Stage host files after workspace/mount setup but before exec. Anything
+    // placed here is inside the RAM workspace and will be scrubbed on exit.
+    if let Err(error) = copy_in_files(session) {
+        eprintln!("burnbox-core: copy-in failed: {error}");
+        let _ = cleanup_mounts(session, ram_mounted, home_mounted);
+        return EXIT_RUNTIME;
     }
 
     let target_pid = match unsafe { fork() } {
@@ -490,6 +614,11 @@ fn build_environment(session: &Session) -> Vec<CString> {
     environment.push(
         CString::new(format!("TMPDIR={workspace}")).expect("workspace path cannot contain NUL"),
     );
+    // Keep PWD consistent with the child's cwd so relative paths such as
+    // `xdg-open <basename>` resolve against the workspace.
+    environment.push(
+        CString::new(format!("PWD={workspace}")).expect("workspace path cannot contain NUL"),
+    );
     environment.push(
         CString::new(format!("BURNBOX_MODE={}", session.mode))
             .expect("mode cannot contain NUL"),
@@ -499,6 +628,13 @@ fn build_environment(session: &Session) -> Vec<CString> {
 
 /// Replace the grandchild process with the user's target executable.
 fn exec_target(session: &Session) -> ! {
+    // The target runs from the RAM workspace so staged files are directly
+    // addressable by basename (e.g. `xdg-open report.pdf`).
+    if let Err(error) = chdir(&session.mount_point) {
+        eprintln!("burnbox-core: cannot enter RAM workspace: {error}");
+        process::exit(EXIT_RUNTIME);
+    }
+
     let target = match CString::new(session.target.as_str()) {
         Ok(target) => target,
         Err(error) => {
@@ -660,6 +796,7 @@ mod tests {
             ram_mb: 16,
             target: "/bin/true".to_string(),
             target_args: Vec::new(),
+            copy_in: Vec::new(),
             mount_point: PathBuf::from("/dev/shm/burnbox-42"),
         };
         let environment = build_environment(&session);
@@ -669,6 +806,9 @@ mod tests {
         assert!(environment
             .iter()
             .any(|entry| entry.as_bytes() == b"TMPDIR=/dev/shm/burnbox-42"));
+        assert!(environment
+            .iter()
+            .any(|entry| entry.as_bytes() == b"PWD=/dev/shm/burnbox-42"));
     }
 
     #[test]
@@ -681,12 +821,94 @@ mod tests {
             ram_mb: 16,
             target: "/bin/true".to_string(),
             target_args: Vec::new(),
+            copy_in: Vec::new(),
             mount_point: root.clone(),
         };
 
         cleanup_mounts(&session, false, false).expect("fallback cleanup");
 
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn cli_accepts_repeatable_copy_in() {
+        let matches = build_cli()
+            .try_get_matches_from([
+                "burnbox-core",
+                "--mode",
+                "online",
+                "--ram-mb",
+                "64",
+                "--copy-in",
+                "/tmp/first.pdf",
+                "--copy-in",
+                "/tmp/second.pdf",
+                "--target",
+                "/usr/bin/xdg-open",
+                "--",
+                "first.pdf",
+            ])
+            .expect("valid arguments with repeatable --copy-in");
+        let session = session_from_matches(&matches, PathBuf::from("/tmp/mnt"));
+        assert_eq!(
+            session.copy_in,
+            vec!["/tmp/first.pdf", "/tmp/second.pdf"]
+        );
+        assert_eq!(session.target_args, vec!["first.pdf"]);
+    }
+
+    #[test]
+    fn offline_network_check_ignores_only_loopback() {
+        assert!(external_interfaces(["lo"]).is_empty());
+        assert_eq!(
+            external_interfaces(["lo", "eth0", "wlan0"]),
+            vec!["eth0", "wlan0"]
+        );
+        assert_eq!(external_interfaces(Vec::<&OsStr>::new()), Vec::<String>::new());
+
+        let proc_net_dev = "Inter-|   Receive                    Transmit\n face |bytes    packets\n    lo:       0 0 0\n  eth0:       0 0 0\n";
+        assert_eq!(
+            interfaces_from_proc_net_dev(proc_net_dev),
+            vec!["lo", "eth0"]
+        );
+        assert_eq!(
+            external_interfaces(interfaces_from_proc_net_dev(proc_net_dev)),
+            vec!["eth0"]
+        );
+    }
+
+    #[test]
+    fn copy_in_files_are_mode_0600_and_scrubbed() {
+        let root = std::env::temp_dir().join(format!("burnbox-copyin-test-{}", process::id()));
+        let source = root.join("source.txt");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&root).expect("create test root");
+        fs::write(&source, b"highly-sensitive").expect("write source file");
+        create_workspace(&workspace).expect("create test workspace");
+
+        let session = Session {
+            mode: "online".to_string(),
+            ram_mb: 16,
+            target: "/bin/true".to_string(),
+            target_args: Vec::new(),
+            copy_in: vec![source.to_string_lossy().into_owned()],
+            mount_point: workspace.clone(),
+        };
+        copy_in_files(&session).expect("stage copy-in file");
+
+        let staged = workspace.join("source.txt");
+        assert_eq!(fs::read(&staged).expect("read staged file"), b"highly-sensitive");
+        assert_eq!(
+            fs::metadata(&staged).expect("stat staged file").permissions().mode() & 0o777,
+            0o600
+        );
+
+        // The staged file is inside the workspace, so the normal scrub must
+        // overwrite and remove it (proving it is in the zeroize boundary).
+        zero_tree(&workspace).expect("scrub workspace with staged file");
+        assert!(!staged.exists());
+
+        fs::remove_dir_all(&root).ok();
     }
 
     #[test]

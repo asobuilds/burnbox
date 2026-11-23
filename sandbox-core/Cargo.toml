@@ -6,6 +6,6 @@ description = "Unprivileged namespace sandbox and RAM-wipe engine for BurnBox"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
-nix = { version = "0.31", features = ["sched", "mount", "process", "user", "signal"] }
+nix = { version = "0.31", features = ["sched", "mount", "process", "user", "signal", "fs"] }
 serde_json = "1"
 zeroize = "1"
