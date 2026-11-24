@@ -13,7 +13,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
-BURNBOX_VERSION="0.8.0"
+BURNBOX_VERSION="1.0.0"
 
 FAILURES=0
 TOTAL_TESTS=0

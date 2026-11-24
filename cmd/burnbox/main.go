@@ -46,19 +46,16 @@ func printDoctorBanner() {
 	fmt.Println()
 }
 
-// doctorCheckSummary holds the summary of doctor check results.
-type doctorCheckSummary struct {
-	AllPassed bool
-	// Individual check results are printed by the check functions
-}
-
-// doctorMain runs the doctor subcommand and returns the exit code.
+// doctorMain runs the doctor subcommand via cli.Execute() and prints a summary.
 func doctorMain() int {
 	// Print the doctor banner
 	printDoctorBanner()
 
-	// Run doctor checks - the default function prints results internally
-	_ = cli.ForTestDoctorCheck() // expose for testing; in prod, just run default
+	// Run doctor checks via cli.Execute() -> handleDoctor() -> doctorCheckFunc()
+	if err := cli.Execute(); err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
+		return 1
+	}
 
 	// Print a summary line
 	fmt.Println("========================================")
@@ -66,10 +63,6 @@ func doctorMain() int {
 	fmt.Println("Review the output above for any FAIL entries.")
 	fmt.Println("========================================")
 
-	// Since we can't easily capture the pass/fail from the default function
-	// without refactoring, we'll assume checks passed if we got this far.
-	// In a production refinement, the check functions would return results
-	// rather than printing them directly.
 	return 0
 }
 

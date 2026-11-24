@@ -54,3 +54,13 @@ Run `./scripts/install.sh` (no sudo) to copy binaries to `~/.local/bin/` and reg
 - **M1–M7** shipped
 - **M8** slirp4netns rootless networking · strict-vs-native-Firefox proof · acceptance.sh · doctor-advisory release — **shipped**
 - **M9** Viewer auto-discovery (snap/native/alt-browser) + live Wayland/Xephyr GUI smoke test — next
+
+## Milestone 9 — Production hardening & v1.0.0 RC (shipped 2026-11-24)
+- **Security:** `--copy-in` now safely handles symlinks without following them to the host filesystem.
+- **Readiness:** `burnbox doctor` validates `slirp4netns` presence for live URL fetching.
+- **Release:** `CHANGELOG.md` updated. `release.sh` provides manual git tag instructions for the Director.
+
+### Milestone status
+- **M1–M8** shipped
+- **M9** Symlink hardening · slirp doctor check · v1.0.0 prep — **shipped**
+- **v1.0.0** Official Release Tag — *pending Director approval*

@@ -58,3 +58,7 @@ go test ./... && go build -o bin/burnbox ./cmd/burnbox
 ## Milestone 8 status (2026-11-24) — shipped
 - Agent A: src/network.rs slirp4netns (rootless, guarded, dual teardown) + BURNBOX_SECCOMP_DIAG + native-ELF strict proof. Only sandbox-core/** touched.
 - Agent B: acceptance.sh, release.sh doctor-advisory, version 0.8.0 single-source, open URL arg-parse fix.
+
+## Milestone 9 status (2026-11-24) — shipped
+- Agent A: sandbox-core symlink-escape hardening (O_NOFOLLOW), integration test added.
+- Agent B: internal/version 1.0.0, doctor slirp check, CHANGELOG.md, release.sh manual tag output.

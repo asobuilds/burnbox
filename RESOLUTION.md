@@ -52,3 +52,5 @@
   not reproducible on fresh clone).
 - 2026-11-24 (M8): release.sh doctor demoted to advisory (headless/missing-Xephyr hosts no
   longer abort the pipeline). Version single-source internal/version=0.8.0.
+- 2026-11-24 (M9): --copy-in symlink-escape hardened (O_NOFOLLOW/lstat prevents host-file exfiltration). 
+  burnbox doctor now explicitly checks slirp4netns readiness. Version single-source bumped to 1.0.0.

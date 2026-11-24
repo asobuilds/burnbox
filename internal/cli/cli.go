@@ -342,11 +342,19 @@ func defaultDoctorCheckFunc() doctorCheckResult {
 		Details: "/dev/shm is writable by current user",
 	})
 
+	// Check 7: slirp4netns availability for online URLs
+	slirpOK := checkSlirp4netnsAvailable()
+	results = append(results, doctorCheckResult{
+		Name:    "slirp4netns for online URLs",
+		Passed:  true, // always PASS; details indicate capability level
+		Details: slirpOK,
+	})
+
 	// Print the results table
 	PrintDoctorResults(results)
 
 	// Return overall result
-	var allPassed bool
+	allPassed := true
 	for _, r := range results {
 		if !r.Passed {
 			allPassed = false
@@ -479,4 +487,18 @@ func checkDevSHMWritable() bool {
 	// Clean up
 	os.Remove(testFile)
 	return true
+}
+
+// checkSlirp4netnsAvailable checks if slirp4netns is available for online URL fetching.
+// If slirp4netns is on PATH or BURNBOX_SLIRP4NETNS env var is set, returns a PASS detail.
+// Otherwise returns a PASS-with-note detail: "online URLs will be loopback-only".
+// This check always passes (it's informational, not blocking).
+func checkSlirp4netnsAvailable() string {
+	if os.Getenv("BURNBOX_SLIRP4NETNS") != "" {
+		return "slirp4netns available via BURNBOX_SLIRP4NETNS; online URLs supported"
+	}
+	if _, err := exec.LookPath("slirp4netns"); err == nil {
+		return "slirp4netns found on PATH; online URLs supported"
+	}
+	return "slirp4netns not found; online URLs will be loopback-only"
 }
