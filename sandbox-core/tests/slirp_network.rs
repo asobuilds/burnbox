@@ -90,6 +90,39 @@ fn missing_slirp_warns_and_continues() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains(WARNING), "missing warning absent: {stderr}");
     assert!(!stderr.contains("slirp4netns ready"), "unexpected ready message");
+    // Absence is detected by PATH lookup only: no spawn, no privileged setup,
+    // no package-manager attempt.
+    assert!(
+        !stderr.contains("could not start slirp4netns"),
+        "a missing helper must not be spawned: {stderr}"
+    );
+    assert!(
+        !stderr.contains("apt") && !stderr.contains("sudo"),
+        "no package install or privilege escalation may be attempted: {stderr}"
+    );
+    assert_no_shm_leak();
+}
+
+#[test]
+fn absent_slirp_with_no_override_never_touches_network_setup() {
+    // Explicitly cover the documented default state: helper absent and no
+    // BURNBOX_SLIRP4NETNS override. The loopback-only warning is the entire
+    // network action; the session itself succeeds.
+    let output = run_with_timeout(
+        base_command()
+            .env("PATH", "/nonexistent")
+            .args(["--mode", "online", "--ram-mb", "16", "--target", "/bin/true"])
+            .spawn()
+            .expect("spawn burnbox-core"),
+    );
+    assert_eq!(output.status.code(), Some(0));
+    assert_two_json_lines(&output);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.lines().any(|line| line == WARNING),
+        "expected the exact loopback warning: {stderr}"
+    );
+    assert!(!stderr.contains("ready on burnbox0"), "network was configured: {stderr}");
     assert_no_shm_leak();
 }
 

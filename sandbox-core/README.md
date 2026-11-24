@@ -86,6 +86,23 @@ workspace, so `xdg-open <basename>` resolves the staged file. Because staged
 files live inside the workspace, the normal exit scrub walks them, overwrites
 their contents with zeros, and removes them.
 
+### Symlink escape hardening
+
+Host paths are opened with an `openat` chain that uses `O_NOFOLLOW` on every
+component (with `O_PATH|O_DIRECTORY` for intermediate directories), so a
+symlink at **any** level is refused atomically instead of being resolved to a
+host file. An `lstat`-then-`open` pair would leave a race in which the source
+could be swapped between the check and the read. The final descriptor is also
+checked to be a regular file; FIFOs and devices are refused rather than opened.
+
+A symlink input fails the session with exit `1` and a diagnostic such as
+`--copy-in refuses to follow symlink in path: /tmp/evil_link` on stderr — the
+workspace is still zeroized and removed, and stdout keeps its two JSON lines.
+Copying the link verbatim is deliberately **not** offered: host `/etc` remains
+visible in the sandbox, so a link to `/etc/hostname` would leak the same file
+once the target followed it. `tests/copy_in_symlink.rs` covers direct and
+intermediate symlinks plus a regular-file control.
+
 ## Seccomp-BPF
 
 Immediately before `execve`, the target process installs a small classic-BPF

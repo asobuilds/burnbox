@@ -39,10 +39,10 @@ use nix::unistd::{
 use std::ffi::{CString, OsStr};
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
-use std::os::fd::{AsFd, AsRawFd};
+use std::os::fd::{AsFd, AsRawFd, FromRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::Duration;
@@ -237,18 +237,124 @@ fn emergency_cleanup(session: &Session, child_pid: Pid) {
     }
 }
 
+/// Open a `--copy-in` source without ever following a symlink component.
+///
+/// Every directory is opened relative to the previous one with
+/// `O_DIRECTORY|O_NOFOLLOW`, and the final component with `O_NOFOLLOW`, so a
+/// symlink anywhere in the path is refused atomically. An `lstat`-then-`open`
+/// pair would leave a race in which the source could be swapped for a symlink;
+/// the descriptor-based walk has no such gap. `O_NONBLOCK` prevents a FIFO or
+/// device source from hanging the supervisor before the regular-file check.
+fn open_source_no_symlinks(path: &Path) -> io::Result<File> {
+    let components: Vec<_> = path.components().collect();
+    let mut current: Option<File> = None;
+    let mut iter = components.iter().peekable();
+
+    while let Some(component) = iter.next() {
+        let name = match component {
+            Component::RootDir => {
+                // O_PATH needs no read permission on / (userns/AppArmor may
+                // deny a normal O_RDONLY open) and is a valid dirfd for the
+                // following openat calls. The root cannot be a symlink.
+                let fd = unsafe {
+                    libc::open(
+                        c"/".as_ptr(),
+                        libc::O_PATH | libc::O_DIRECTORY | libc::O_CLOEXEC,
+                    )
+                };
+                if fd < 0 {
+                    return Err(io::Error::other(format!(
+                        "--copy-in cannot open /: {}",
+                        io::Error::last_os_error()
+                    )));
+                }
+                // SAFETY: fd was just returned by open and is not owned elsewhere.
+                current = Some(unsafe { File::from_raw_fd(fd) });
+                continue;
+            }
+            Component::CurDir => continue,
+            Component::Prefix(_) => {
+                return Err(io::Error::other(format!(
+                    "--copy-in path has an unsupported prefix: {}",
+                    path.display()
+                )));
+            }
+            Component::Normal(_) | Component::ParentDir => component.as_os_str(),
+        };
+        let is_final = iter.peek().is_none();
+        let c_name = CString::new(name.as_bytes()).map_err(|_| {
+            io::Error::other(format!(
+                "--copy-in path contains an interior NUL: {}",
+                path.display()
+            ))
+        })?;
+        let flags = if is_final {
+            // O_NONBLOCK keeps a FIFO/device source from hanging before the
+            // regular-file check below.
+            libc::O_RDONLY | libc::O_CLOEXEC | libc::O_NOFOLLOW | libc::O_NONBLOCK
+        } else {
+            // O_PATH dirfds need no read permission on intermediate directories
+            // and cannot be tricked into following the component they name.
+            libc::O_PATH | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC
+        };
+        let parent_fd = current
+            .as_ref()
+            .map_or(libc::AT_FDCWD, AsRawFd::as_raw_fd);
+        // SAFETY: parent_fd is AT_FDCWD or a live directory descriptor owned by
+        // `current`; c_name is a NUL-terminated path component.
+        let fd = unsafe { libc::openat(parent_fd, c_name.as_ptr(), flags) };
+        if fd < 0 {
+            let error = io::Error::last_os_error();
+            // With O_DIRECTORY an intermediate symlink yields ENOTDIR rather
+            // than ELOOP. Inspect the component without following it so the
+            // rejection stays accurate; no symlink is ever traversed.
+            let mut stat = unsafe { std::mem::zeroed::<libc::stat>() };
+            let is_symlink = unsafe {
+                libc::fstatat(parent_fd, c_name.as_ptr(), &mut stat, libc::AT_SYMLINK_NOFOLLOW)
+            } == 0
+                && stat.st_mode & libc::S_IFMT == libc::S_IFLNK;
+            return Err(if error.raw_os_error() == Some(libc::ELOOP) || is_symlink {
+                io::Error::other(format!(
+                    "--copy-in refuses to follow symlink in path: {}",
+                    path.display()
+                ))
+            } else {
+                io::Error::other(format!("--copy-in {}: {error}", path.display()))
+            });
+        }
+        // SAFETY: fd was just returned by openat and is not owned elsewhere.
+        let file = unsafe { File::from_raw_fd(fd) };
+        if is_final {
+            if !file.metadata()?.is_file() {
+                return Err(io::Error::other(format!(
+                    "--copy-in {} is not a regular file",
+                    path.display()
+                )));
+            }
+            return Ok(file);
+        }
+        current = Some(file);
+    }
+
+    Err(io::Error::other(format!(
+        "--copy-in path has no file name: {}",
+        path.display()
+    )))
+}
+
 /// Stage each `--copy-in` host file into the RAM workspace. Only the basename
 /// is kept, creation is exclusive with mode 0600, and the copy is flushed.
-/// This runs inside the namespace after any tmpfs mount, so staged files live
-/// in the workspace and are covered by the `zero_tree` scrub on exit.
+/// Symlinks are refused (the copy itself is not followed), so host contents
+/// outside the named file cannot enter the sandbox. This runs inside the
+/// namespace after any tmpfs mount, so staged files live in the workspace and
+/// are covered by the `zero_tree` scrub on exit.
 fn copy_in_files(session: &Session) -> io::Result<()> {
     for host_path in &session.copy_in {
         let source = Path::new(host_path);
         let basename = source.file_name().ok_or_else(|| {
             io::Error::other(format!("--copy-in path has no file name: {host_path}"))
         })?;
-        let mut input = File::open(source)
-            .map_err(|error| io::Error::other(format!("--copy-in {host_path}: {error}")))?;
+        let mut input = open_source_no_symlinks(source)?;
         let destination = session.mount_point.join(basename);
         let mut output = OpenOptions::new()
             .write(true)
@@ -1126,6 +1232,69 @@ mod tests {
         zero_tree(&workspace).expect("scrub workspace with staged file");
         assert!(!staged.exists());
 
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn copy_in_refuses_a_direct_symlink_to_a_host_file() {
+        let root = std::env::temp_dir().join(format!(
+            "burnbox-copyin-direct-link-{}",
+            process::id()
+        ));
+        let workspace = root.join("workspace");
+        let link = root.join("evil_link");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&workspace).expect("create test workspace");
+        std::os::unix::fs::symlink("/etc/hostname", &link).expect("create host symlink");
+
+        let session = Session {
+            mode: "offline".to_string(),
+            ram_mb: 16,
+            target: "/bin/true".to_string(),
+            target_args: Vec::new(),
+            copy_in: vec![link.to_string_lossy().into_owned()],
+            seccomp_strict: false,
+            mount_point: workspace.clone(),
+        };
+        let error = copy_in_files(&session).expect_err("symlink input must be refused");
+        assert!(error.to_string().contains("symlink"), "unexpected error: {error}");
+        assert!(
+            !workspace.join("evil_link").exists(),
+            "symlink target must never be staged"
+        );
+        fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn copy_in_refuses_a_symlink_in_an_intermediate_directory() {
+        let root = std::env::temp_dir().join(format!(
+            "burnbox-copyin-parent-link-{}",
+            process::id()
+        ));
+        let workspace = root.join("workspace");
+        let real_dir = root.join("real");
+        let link_dir = root.join("linkdir");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&workspace).expect("create test workspace");
+        fs::create_dir_all(&real_dir).expect("create real directory");
+        fs::write(real_dir.join("data.txt"), b"host secret").expect("write host secret");
+        std::os::unix::fs::symlink(&real_dir, &link_dir).expect("create directory symlink");
+
+        let session = Session {
+            mode: "offline".to_string(),
+            ram_mb: 16,
+            target: "/bin/true".to_string(),
+            target_args: Vec::new(),
+            copy_in: vec![link_dir.join("data.txt").to_string_lossy().into_owned()],
+            seccomp_strict: false,
+            mount_point: workspace.clone(),
+        };
+        let error = copy_in_files(&session).expect_err("parent symlink must be refused");
+        assert!(error.to_string().contains("symlink"), "unexpected error: {error}");
+        assert!(
+            !workspace.join("data.txt").exists(),
+            "host secret must never be staged"
+        );
         fs::remove_dir_all(&root).ok();
     }
 
