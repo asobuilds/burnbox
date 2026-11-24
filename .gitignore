@@ -4,3 +4,6 @@ sandbox-core/target/
 /release/
 /bin/
 /target/
+/debian/
+/debian_build/
+/debian_pkg/

@@ -1,8 +1,0 @@
-Package: burnbox
-Version: 0.5.0
-Section: utils
-Architecture: amd64
-Priority: optional
-Maintainer: BurnBox <burnbox@example.com>
-Description: Unprivileged namespace sandbox and RAM wipe engine
-Homepage: https://github.com/burnbox/burnbox

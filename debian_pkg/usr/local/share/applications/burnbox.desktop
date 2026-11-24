@@ -1,7 +1,0 @@
-[Desktop Entry]
-Name=BurnBox Sandbox
-Comment=Run executables in an unprivileged namespace sandbox
-Exec=burnbox open %F
-Terminal=true
-Type=Application
-MimeType=application/pdf;application/zip;application/x-html;text/html;application/vnd.openxmlformats-officedocument.wordprocessingml.document;
