@@ -35,6 +35,12 @@ case the workspace directory itself is used directly (mode `0700`), `HOME` and
 warning. On exit every file is overwritten with a `zeroize`-scrubbed zero buffer
 and the directory is removed (or the tmpfs is unmounted).
 
+The parent catches `SIGTERM`, `SIGINT`, `SIGHUP` and `SIGPIPE`. Its handler is
+async-signal-safe: it only sets an atomic flag and writes one byte to a
+self-pipe. The main loop then kills the supervisor, performs the same zeroize +
+rmdir scrub, emits the `wiped` line and exits with code `1`. An integration test
+(`tests/signal_scrub.rs`) proves a mid-session `SIGTERM` leaves no workspace.
+
 ## Staging files with `--copy-in`
 
 `--copy-in <host_path>` may be repeated. After workspace/mount setup but before
@@ -63,11 +69,12 @@ process. Failure to install the filter returns exit code `3` and the target is
 never executed; a target killed by the filter (`SIGSYS`) also makes the session
 exit with code `3`.
 
-The optional `--seccomp-strict` flag establishes the contract for a future,
-stricter profile. Passing it logs a warning that complex GUI apps may break;
-for now it applies the same expanded deny-list (no extra restrictions such as
-socket-family filtering or `clone3` blocking). The flag is parsed by both
-`burnbox-core` and the Go orchestrator without changing JSON output.
+The optional `--seccomp-strict` flag logs
+`Warning: strict seccomp enabled; may break complex GUI apps` to stderr and
+switches to an **allow-list** of syscalls needed by typical viewers (file I/O,
+memory, signals, scheduling, sockets, etc.). Any syscall outside that list —
+including every entry of the deny-list above — is killed, yielding exit code
+`3`. The flag does not change the two JSON stdout lines.
 
 ## stdout / exit contract
 

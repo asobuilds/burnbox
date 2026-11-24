@@ -13,17 +13,22 @@
 //! flag, `online` sessions continue with a stderr warning; `offline` sessions
 //! treat it as a namespace setup failure and additionally assert that no
 //! external interface is visible in `/sys/class/net`. A small seccomp-BPF
-//! filter is installed in the target before `execve`. Optional `--copy-in`
-//! files are staged into the RAM workspace (mode 0600) with the target's cwd
-//! set there, so they are inside the zeroize scrub boundary.
+//! filter is installed in the target before `execve`: the default deny-list
+//! blocks escape primitives, while `--seccomp-strict` switches to an allow-list
+//! of viewer syscalls. Optional `--copy-in` files are staged into the RAM
+//! workspace (mode 0600) with the target's cwd set there, so they are inside
+//! the zeroize scrub boundary. The parent catches SIGTERM/SIGINT/SIGHUP/SIGPIPE
+//! and performs that same zeroize + rmdir scrub before exiting as interrupted.
 
 mod seccomp;
 
 use clap::{Arg, Command};
 use nix::errno::Errno;
+use nix::libc;
 use nix::mount::{mount, umount2, MntFlags, MsFlags};
+use nix::poll::{poll, PollFd, PollFlags};
 use nix::sched::{clone, CloneFlags};
-use nix::sys::signal::Signal;
+use nix::sys::signal::{kill, sigaction, SaFlags, SigAction, SigHandler, SigSet, Signal};
 use nix::sys::wait::{waitpid, WaitPidFlag, WaitStatus};
 use nix::unistd::{
     chdir, execvpe, fork, getegid, geteuid, pipe, write as fd_write, ForkResult, Pid,
@@ -31,11 +36,13 @@ use nix::unistd::{
 use std::ffi::{CString, OsStr};
 use std::fs::{self, File, OpenOptions, Permissions};
 use std::io::{self, Write};
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsFd, AsRawFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process;
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::time::Duration;
 use zeroize::Zeroize;
 
 /// Session ended cleanly and tmpfs was scrubbed/unmounted.
@@ -51,6 +58,48 @@ const EXIT_SECURITY: i32 = 3;
 const WIPE_CHUNK: usize = 64 * 1024;
 /// Stack for the namespaced supervisor process (clone needs its own stack).
 const SUPERVISOR_STACK: usize = 1024 * 1024;
+
+/// Set by the async signal handler; the main loop observes it and performs the
+/// zeroize + rmdir cleanup (which is not async-signal-safe itself).
+static INTERRUPTED: AtomicBool = AtomicBool::new(false);
+/// Write end of a self-pipe woken by the handler so `poll` returns promptly.
+static INTERRUPT_FD: AtomicI32 = AtomicI32::new(-1);
+
+/// Async-signal-safe handler: only atomics and a single `write(2)` are used.
+extern "C" fn interrupt_handler(_signal: libc::c_int) {
+    INTERRUPTED.store(true, Ordering::SeqCst);
+    let fd = INTERRUPT_FD.load(Ordering::SeqCst);
+    if fd >= 0 {
+        let byte = [1u8];
+        // SAFETY: fd is a valid pipe write end owned by the parent, and the
+        // buffer has room for the single byte requested.
+        unsafe {
+            libc::write(fd, byte.as_ptr().cast::<libc::c_void>(), 1);
+        }
+    }
+}
+
+/// Catch termination signals in the parent so an interrupted session cannot
+/// leave a `/dev/shm/burnbox-<pid>` workspace behind.
+fn install_signal_handlers(interrupt_fd: libc::c_int) -> nix::Result<()> {
+    INTERRUPT_FD.store(interrupt_fd, Ordering::SeqCst);
+    let action = SigAction::new(
+        SigHandler::Handler(interrupt_handler),
+        SaFlags::empty(),
+        SigSet::empty(),
+    );
+    for signal in [
+        Signal::SIGTERM,
+        Signal::SIGINT,
+        Signal::SIGHUP,
+        Signal::SIGPIPE,
+    ] {
+        // SAFETY: `action` outlives the registration and the handler only
+        // touches atomics plus a pipe write.
+        unsafe { sigaction(signal, &action)? };
+    }
+    Ok(())
+}
 
 #[derive(Clone, Debug)]
 struct Session {
@@ -150,6 +199,39 @@ fn create_workspace(path: &Path) -> io::Result<()> {
     let mut builder = fs::DirBuilder::new();
     builder.recursive(true).mode(0o700);
     builder.create(path)
+}
+
+/// Shared parent-side scrub: overwrite every file with zeros, then remove the
+/// workspace directory. Used both on the normal exit path and on interruption.
+fn zeroize_and_remove_workspace(path: &Path) -> io::Result<()> {
+    match zero_tree(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    match fs::remove_dir_all(path) {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    Ok(())
+}
+
+/// Signal-driven teardown: stop the supervisor and target, then scrub the
+/// workspace before the parent exits with an interrupted-session code.
+fn emergency_cleanup(session: &Session, child_pid: Pid) {
+    let _ = kill(child_pid, Signal::SIGKILL);
+    for _ in 0..50 {
+        match waitpid(child_pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => std::thread::sleep(Duration::from_millis(10)),
+            Ok(_) | Err(Errno::ECHILD) => break,
+            Err(Errno::EINTR) => continue,
+            Err(_) => break,
+        }
+    }
+    if let Err(error) = zeroize_and_remove_workspace(&session.mount_point) {
+        eprintln!("burnbox-core: interrupted cleanup failed: {error}");
+    }
 }
 
 /// Stage each `--copy-in` host file into the RAM workspace. Only the basename
@@ -310,6 +392,22 @@ fn main() {
         process::exit(EXIT_SANDBOX);
     }
 
+    // Self-pipe woken by async signal handlers. The handler itself only sets a
+    // flag and writes one byte; the main loop performs the zeroize scrub.
+    let (interrupt_read, interrupt_write) = match pipe() {
+        Ok(fds) => fds,
+        Err(error) => {
+            eprintln!("burnbox-core: cannot create signal pipe: {error}");
+            let _ = zeroize_and_remove_workspace(&session.mount_point);
+            process::exit(EXIT_SANDBOX);
+        }
+    };
+    if let Err(error) = install_signal_handlers(interrupt_write.as_raw_fd()) {
+        eprintln!("burnbox-core: cannot install signal handlers: {error}");
+        let _ = zeroize_and_remove_workspace(&session.mount_point);
+        process::exit(EXIT_SANDBOX);
+    }
+
     // Avoid duplicating buffered output into the cloned process.
     let _ = io::stdout().flush();
     let _ = io::stderr().flush();
@@ -318,7 +416,7 @@ fn main() {
         Ok(fds) => fds,
         Err(error) => {
             eprintln!("burnbox-core: cannot create sync pipe: {error}");
-            let _ = fs::remove_dir_all(&session.mount_point);
+            let _ = zeroize_and_remove_workspace(&session.mount_point);
             process::exit(EXIT_SANDBOX);
         }
     };
@@ -346,7 +444,7 @@ fn main() {
             eprintln!("burnbox-core: offline mode requires CLONE_NEWNET: {error}");
             drop(sync_read);
             drop(sync_write);
-            let _ = fs::remove_dir_all(&session.mount_point);
+            let _ = zeroize_and_remove_workspace(&session.mount_point);
             process::exit(EXIT_SANDBOX);
         }
         Err(error) => {
@@ -362,7 +460,7 @@ fn main() {
                     eprintln!("burnbox-core: namespace clone failed: {error}");
                     drop(sync_read);
                     drop(sync_write);
-                    let _ = fs::remove_dir_all(&session.mount_point);
+                    let _ = zeroize_and_remove_workspace(&session.mount_point);
                     process::exit(EXIT_SANDBOX);
                 }
             }
@@ -382,20 +480,32 @@ fn main() {
     drop(sync_write);
     drop(sync_read);
 
-    let status = match waitpid(child_pid, None) {
-        Ok(status) => status,
-        Err(error) => {
-            eprintln!("burnbox-core: failed to wait for sandbox: {error}");
-            let _ = fs::remove_dir_all(&session.mount_point);
+    // Poll the self-pipe while waiting: a caught signal wakes poll immediately
+    // and the scrub happens here, outside the async signal handler.
+    let mut poll_fds = [PollFd::new(interrupt_read.as_fd(), PollFlags::POLLIN)];
+    let status = loop {
+        if INTERRUPTED.load(Ordering::SeqCst) {
+            eprintln!("burnbox-core: interrupted by signal; scrubbing workspace");
+            emergency_cleanup(&session, child_pid);
             emit_status("wiped", child_pid, &session.mount_point);
             process::exit(EXIT_RUNTIME);
         }
+        match waitpid(child_pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => {
+                let _ = poll(&mut poll_fds, 100u16);
+            }
+            Ok(status) => break status,
+            Err(Errno::EINTR) => continue,
+            Err(Errno::ECHILD) => break WaitStatus::Exited(child_pid, EXIT_RUNTIME),
+            Err(error) => {
+                eprintln!("burnbox-core: failed to wait for sandbox: {error}");
+                break WaitStatus::Exited(child_pid, EXIT_RUNTIME);
+            }
+        }
     };
 
-    match fs::remove_dir_all(&session.mount_point) {
-        Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-        Err(error) => eprintln!("burnbox-core: cannot remove RAM workspace: {error}"),
+    if let Err(error) = zeroize_and_remove_workspace(&session.mount_point) {
+        eprintln!("burnbox-core: cannot scrub RAM workspace: {error}");
     }
     emit_status("wiped", child_pid, &session.mount_point);
 
@@ -464,11 +574,9 @@ fn write_proc_file(path: &str, value: &str) -> io::Result<()> {
 /// The parent has already installed the uid/gid maps before this function runs.
 fn run_sandbox(session: &Session) -> i32 {
     if session.seccomp_strict {
-        // The flag establishes the CLI contract now; a stricter profile (for
-        // example restricting socket families or clone3) can be added later.
-        eprintln!(
-            "burnbox-core: warning: --seccomp-strict may break complex GUI apps; applying the expanded default deny-list (stricter profile is a contract placeholder)"
-        );
+        // The target gets an allow-list filter; warn because apps that need
+        // syscalls outside it (for example clone3) will be killed.
+        eprintln!("Warning: strict seccomp enabled; may break complex GUI apps");
     }
 
     // Hard assertion for offline sessions: CLONE_NEWNET was granted, but the
@@ -673,7 +781,7 @@ fn exec_target(session: &Session) -> ! {
 
     // Namespace/mount setup is complete; lock the target down before exec.
     // A failure here is a security violation: never run the target unfiltered.
-    if let Err(error) = seccomp::install() {
+    if let Err(error) = seccomp::install(session.seccomp_strict) {
         eprintln!("burnbox-core: seccomp filter installation failed: {error}");
         process::exit(EXIT_SECURITY);
     }
