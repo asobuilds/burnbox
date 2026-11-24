@@ -69,7 +69,8 @@ compile_error!("burnbox-core seccomp filter does not know this architecture");
 ///
 /// Covers kernel-module loading and kexec, ptrace/introspection, cross-process
 /// memory access, file-handle and fanotify access, BPF/perf/userfaultfd
-/// primitives, and mount operations (AppArmor backup).
+/// primitives, io_uring (async I/O can bypass ordinary syscall visibility),
+/// and mount operations (AppArmor backup).
 fn denied_syscalls() -> &'static [libc::c_long] {
     &[
         libc::SYS_ptrace,
@@ -81,6 +82,11 @@ fn denied_syscalls() -> &'static [libc::c_long] {
         libc::SYS_bpf,
         libc::SYS_perf_event_open,
         libc::SYS_userfaultfd,
+        // io_uring submissions are not visible as individual syscalls to
+        // observers of the target, so the whole interface stays blocked.
+        libc::SYS_io_uring_setup,
+        libc::SYS_io_uring_enter,
+        libc::SYS_io_uring_register,
         libc::SYS_kcmp,
         libc::SYS_process_vm_readv,
         libc::SYS_process_vm_writev,
@@ -568,11 +574,15 @@ mod tests {
         assert_eq!(program[kill_index - 1].k, SECCOMP_RET_ALLOW);
         assert_eq!(program[kill_index].k, SECCOMP_RET_KILL_PROCESS);
 
-        // Explicitly assert every syscall required by the Milestone 5 contract.
+        // Explicitly assert every syscall required by the Milestone 5 contract
+        // plus the Milestone 10 io_uring hotfix.
         for syscall in [
             libc::SYS_bpf,
             libc::SYS_perf_event_open,
             libc::SYS_userfaultfd,
+            libc::SYS_io_uring_setup,
+            libc::SYS_io_uring_enter,
+            libc::SYS_io_uring_register,
             libc::SYS_kcmp,
             libc::SYS_process_vm_readv,
             libc::SYS_process_vm_writev,

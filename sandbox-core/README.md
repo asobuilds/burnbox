@@ -113,6 +113,8 @@ process on:
 - `ptrace`, `kcmp`, `process_vm_readv`, `process_vm_writev`
 - `init_module`, `finit_module`, `kexec_load`
 - `bpf`, `perf_event_open`, `userfaultfd`
+- `io_uring_setup`, `io_uring_enter`, `io_uring_register` (async I/O can bypass
+  ordinary syscall visibility)
 - `name_to_handle_at`, `open_by_handle_at`, `fanotify_init`
 - `mount`, `umount2` (reinforce the AppArmor boundary)
 
