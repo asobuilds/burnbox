@@ -26,6 +26,24 @@ const SECCOMP_DATA_ARCH_OFFSET: u32 = 4;
 
 const SECCOMP_RET_KILL_PROCESS: u32 = 0x8000_0000;
 const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
+/// Diagnostic-only action: `SECCOMP_RET_ERRNO | ENOSYS`. With this action an
+/// unlisted syscall shows up by name in `strace -f` instead of killing the
+/// process, which is how missing allow-list entries are identified.
+const SECCOMP_RET_DIAGNOSTIC: u32 = 0x0005_0000 | 38;
+
+/// Opt-in environment switch for the diagnostic action. Never enabled by
+/// default: it makes the filter permissive-by-error and must not ship as the
+/// normal security posture.
+pub const SECCOMP_DIAG_ENV: &str = "BURNBOX_SECCOMP_DIAG";
+
+/// Action applied to syscalls outside the active policy.
+fn deny_action() -> u32 {
+    if std::env::var_os(SECCOMP_DIAG_ENV).is_some() {
+        SECCOMP_RET_DIAGNOSTIC
+    } else {
+        SECCOMP_RET_KILL_PROCESS
+    }
+}
 
 // AUDIT_ARCH_* values from linux/audit.h.
 #[cfg(target_arch = "x86_64")]
@@ -357,16 +375,22 @@ fn instruction(code: u16, jt: u8, jf: u8, k: u32) -> libc::sock_filter {
 
 /// Build the classic-BPF program for the requested policy.
 fn build_filter(strict: bool) -> Vec<libc::sock_filter> {
+    build_filter_with_action(strict, deny_action())
+}
+
+/// Filter construction with an explicit deny action so the diagnostic mode can
+/// be unit tested without mutating process-wide environment variables.
+fn build_filter_with_action(strict: bool, deny: u32) -> Vec<libc::sock_filter> {
     if strict {
-        build_allow_filter()
+        build_allow_filter(deny)
     } else {
-        build_deny_filter()
+        build_deny_filter(deny)
     }
 }
 
 /// Default policy: load arch -> reject wrong arch -> load nr -> reject blocked
 /// nrs -> allow.
-fn build_deny_filter() -> Vec<libc::sock_filter> {
+fn build_deny_filter(deny: u32) -> Vec<libc::sock_filter> {
     let blocked = denied_syscalls();
     // Layout: [0]=ld arch, [1]=jeq arch, [2]=ld nr, [3..3+N]=jeq nr,
     //         [3+N]=allow, [4+N]=kill.
@@ -389,18 +413,13 @@ fn build_deny_filter() -> Vec<libc::sock_filter> {
     }
 
     program.push(instruction(BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW));
-    program.push(instruction(
-        BPF_RET_K,
-        0,
-        0,
-        SECCOMP_RET_KILL_PROCESS,
-    ));
+    program.push(instruction(BPF_RET_K, 0, 0, deny));
     program
 }
 
 /// Strict policy: load arch -> reject wrong arch -> load nr -> jump to ALLOW
 /// on a listed nr, falling through to the KILL instruction otherwise.
-fn build_allow_filter() -> Vec<libc::sock_filter> {
+fn build_allow_filter(deny: u32) -> Vec<libc::sock_filter> {
     let allowed = allowed_syscalls();
     // Layout: [0]=ld arch, [1]=jeq arch, [2]=ld nr, [3..3+N)=jeq nr,
     //         [3+N]=kill (default fall-through), [4+N]=allow (jump target).
@@ -425,12 +444,7 @@ fn build_allow_filter() -> Vec<libc::sock_filter> {
 
     // Fall-through (no listed nr matched) kills; matched syscalls jump to the
     // ALLOW instruction below.
-    program.push(instruction(
-        BPF_RET_K,
-        0,
-        0,
-        SECCOMP_RET_KILL_PROCESS,
-    ));
+    program.push(instruction(BPF_RET_K, 0, 0, deny));
     program.push(instruction(BPF_RET_K, 0, 0, SECCOMP_RET_ALLOW));
     program
 }
@@ -438,6 +452,11 @@ fn build_allow_filter() -> Vec<libc::sock_filter> {
 /// Install the filter in the current process. Must be called after namespace
 /// setup and immediately before `execve` so only the target is restricted.
 pub fn install(strict: bool) -> Result<(), String> {
+    if std::env::var_os(SECCOMP_DIAG_ENV).is_some() {
+        eprintln!(
+            "Warning: seccomp diagnostics enabled; unlisted syscalls return ENOSYS instead of SIGSYS"
+        );
+    }
     let mut program = build_filter(strict);
     let mut filter = libc::sock_fprog {
         len: program.len() as libc::c_ushort,
@@ -612,6 +631,29 @@ mod tests {
         }
         for syscall in denied_syscalls() {
             assert!(!allowed.contains(syscall), "strict mode allows {syscall}");
+        }
+    }
+
+    /// The diagnostic action must expose unlisted syscalls through strace
+    /// (ENOSYS) while leaving the production KILL action untouched.
+    #[test]
+    fn diagnostic_action_replaces_kill_with_enosys() {
+        for strict in [false, true] {
+            let program = build_filter_with_action(strict, SECCOMP_RET_DIAGNOSTIC);
+            let kill_index = if strict {
+                3 + allowed_syscalls().len()
+            } else {
+                4 + denied_syscalls().len()
+            };
+            assert_eq!(program[kill_index].k, SECCOMP_RET_DIAGNOSTIC);
+            assert_eq!(
+                evaluate(&program, libc::SYS_read, AUDIT_ARCH),
+                SECCOMP_RET_ALLOW
+            );
+            assert_eq!(
+                evaluate(&program, libc::SYS_mount, AUDIT_ARCH),
+                SECCOMP_RET_DIAGNOSTIC
+            );
         }
     }
 }

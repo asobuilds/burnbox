@@ -24,6 +24,41 @@ A network namespace (`CLONE_NEWNET`) is requested in the same call:
 The parent process (the namespace creator) writes `uid_map`/`gid_map` and
 signals the supervisor through a pipe before any mount happens.
 
+## Rootless online networking (`slirp4netns`)
+
+`online` sessions try to give the isolated network namespace real TCP/IP
+without any host privileges. After the uid/gid maps are installed, the parent
+searches `PATH` for `slirp4netns` (the optional `BURNBOX_SLIRP4NETNS` environment
+variable can point at a binary installed off-PATH) and, when found, launches it
+against the supervisor's PID:
+
+```
+slirp4netns --configure --ready-fd=1 <supervisor-pid> burnbox0
+```
+
+Only the host-side parent spawns the helper — the target never gains the
+ability to create host interfaces. `--configure` brings up `burnbox0` as
+`10.0.2.100/24` with the slirp gateway/DNS at `10.0.2.2`/`10.0.2.3`. The parent
+waits for the one-byte readiness notification on the helper's stdout **before**
+releasing the supervisor to `execve` the target, so no process ever sees a
+half-configured interface. The helper is killed and reaped on every exit path,
+including the signal-driven scrub.
+
+If the binary is missing, the session still runs and writes exactly this line
+to stderr (never stdout):
+
+```
+Warning: slirp4netns not found; network isolation is strict loopback only. Install slirp4netns for live URL fetching.
+```
+
+`offline` sessions never invoke the helper: the external interface would
+violate their loopback-only assertion. `slirp4netns` is a runtime dependency,
+not a build dependency; CI hosts without it keep the previous behavior.
+
+`tests/slirp_network.rs` covers the missing-binary warning, the exact spawn
+arguments using an executable stub, and an end-to-end tap-configuration check
+that self-skips when no real `slirp4netns` is available.
+
 ## RAM workspace and AppArmor fallback
 
 The workspace path is `/dev/shm/burnbox-<pid>`, which is kernel `tmpfs`.
@@ -105,10 +140,41 @@ through any available native Firefox binary; it self-skips when none is
 installed so CI is never blocked, and asserts exit `0`, exactly two JSON lines,
 and no `/dev/shm/burnbox-*` leak.
 
-Note: BurnBox requests `CLONE_NEWNET` even in `online` mode. On hosts that grant
-it, the session has only loopback networking, so loading an external `https://`
-URL stalls on DNS; this is expected network isolation, not a seccomp kill. Use a
-local `file://` document or `data:` URL to validate viewer rendering offline.
+SysV IPC (`shmget`/`shmat`/`msgget`/...) is intentionally **not** in the
+allow-list: BurnBox does not unshare the host IPC namespace, so permitting those
+calls would let the target exchange shared memory with unrelated host
+processes. Adding them safely would first require `CLONE_NEWIPC`.
+
+### Diagnosing a missing allow-list entry
+
+Setting `BURNBOX_SECCOMP_DIAG=1` replaces the `KILL_PROCESS` action with
+`SECCOMP_RET_ERRNO | ENOSYS` and prints a warning to stderr. Under `strace`, a
+missing entry is named instead of appearing as an unexplained `SIGSYS`:
+
+```
+BURNBOX_SECCOMP_DIAG=1 strace -f -o /tmp/ff.strace \
+  ./bin/burnbox-core --mode online --ram-mb 512 --seccomp-strict \
+  --target /path/to/native/firefox -- --headless --screenshot=/tmp/ff.png file:///etc/hostname
+grep ENOSYS /tmp/ff.strace
+```
+
+This is a diagnostic switch only; it must never be enabled in production. The
+option is covered by a BPF-evaluator unit test. Using it on the native Firefox
+path showed no ENOSYS from BurnBox's filter: `clone3` and `sched_getaffinity`
+ENOSYS lines came from Firefox's own nested content-process sandbox, while the
+main process' calls succeeded.
+
+Note: on hosts where `/usr/bin/firefox` is a snap wrapper (a `#!/bin/sh` script
+that execs setuid `snap-confine`), that wrapper exits `1` with
+`cap_dac_override not found in current capabilities` even with **no seccomp
+filter at all**. Unprivileged user namespaces drop the file/setuid privileges
+snap-confine needs, so no allow-list change can fix it. Use the native ELF
+binary (for example `/snap/firefox/current/usr/lib/firefox/firefox`) for strict
+viewer runs; the integration test discovers it automatically.
+
+Without `slirp4netns`, `online` sessions keep only loopback networking and an
+external `https://` URL stalls on DNS (not a seccomp kill). With the helper
+installed, live URL fetching works without host privileges.
 
 ## stdout / exit contract
 

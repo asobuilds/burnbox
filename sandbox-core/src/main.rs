@@ -12,7 +12,9 @@
 //! Network isolation is requested with `CLONE_NEWNET`. If the host denies that
 //! flag, `online` sessions continue with a stderr warning; `offline` sessions
 //! treat it as a namespace setup failure and additionally assert that no
-//! external interface is visible in `/sys/class/net`. A small seccomp-BPF
+//! external interface is visible in `/sys/class/net`. `online` sessions that
+//! find `slirp4netns` attach it to the new netns for user-mode TCP/IP; otherwise
+//! they warn and stay loopback-only. A small seccomp-BPF
 //! filter is installed in the target before `execve`: the default deny-list
 //! blocks escape primitives, while `--seccomp-strict` switches to an allow-list
 //! of viewer syscalls. Optional `--copy-in` files are staged into the RAM
@@ -20,6 +22,7 @@
 //! the zeroize scrub boundary. The parent catches SIGTERM/SIGINT/SIGHUP/SIGPIPE
 //! and performs that same zeroize + rmdir scrub before exiting as interrupted.
 
+mod network;
 mod seccomp;
 
 use clap::{Arg, Command};
@@ -337,6 +340,49 @@ fn emit_status(status: &str, pid: Pid, mount_point: &Path) {
     let _ = io::stdout().flush();
 }
 
+/// Try to give an `online` session user-mode networking. Any failure is
+/// non-fatal: the session continues with loopback only and an explicit warning.
+fn maybe_start_network(session: &Session, supervisor: Pid) -> Option<network::Slirp> {
+    if session.mode != "online" {
+        return None;
+    }
+    let Some(binary) = network::find_slirp4netns() else {
+        eprintln!("{}", network::SLIRP_MISSING_WARNING);
+        return None;
+    };
+    match network::start(supervisor.as_raw(), &binary) {
+        Ok(mut slirp) => match slirp.wait_ready() {
+            Ok(()) => {
+                eprintln!(
+                    "burnbox-core: slirp4netns ready on {} ({})",
+                    network::TAP_NAME,
+                    binary.display()
+                );
+                Some(slirp)
+            }
+            Err(error) => {
+                eprintln!(
+                    "burnbox-core: warning: slirp4netns did not become ready ({error}); continuing with loopback only"
+                );
+                None
+            }
+        },
+        Err(error) => {
+            eprintln!(
+                "burnbox-core: warning: could not start slirp4netns ({error}); continuing with loopback only"
+            );
+            None
+        }
+    }
+}
+
+/// Tear down the userspace stack before the parent exits. `process::exit`
+/// skips destructors, so this must be called explicitly on every exit path
+/// that can follow a successful start.
+fn stop_network(slirp: &mut Option<network::Slirp>) {
+    drop(slirp.take());
+}
+
 /// Clone the namespace supervisor with the requested flag set. Shared by the
 /// first attempt (with `CLONE_NEWNET`) and the degraded retry (without it).
 fn clone_supervisor(
@@ -430,6 +476,9 @@ fn main() {
         CloneFlags::CLONE_NEWUSER | CloneFlags::CLONE_NEWNS | CloneFlags::CLONE_NEWPID;
     let network_flags = base_flags | CloneFlags::CLONE_NEWNET;
 
+    // Whether the supervisor actually owns a private network namespace. When
+    // CLONE_NEWNET is denied we must not attach slirp to the host's netns.
+    let mut network_isolated = true;
     let child_pid = match clone_supervisor(
         &session,
         child_read,
@@ -455,7 +504,10 @@ fn main() {
                 "burnbox-core: warning: CLONE_NEWNET unavailable ({error}); continuing without network isolation"
             );
             match clone_supervisor(&session, child_read, child_write, &mut stack, base_flags) {
-                Ok(pid) => pid,
+                Ok(pid) => {
+                    network_isolated = false;
+                    pid
+                }
                 Err(error) => {
                     eprintln!("burnbox-core: namespace clone failed: {error}");
                     drop(sync_read);
@@ -473,6 +525,20 @@ fn main() {
     if !maps_ok {
         eprintln!("burnbox-core: cannot write uid/gid maps for child namespace");
     }
+
+    // Attach slirp4netns to the supervisor's netns while the supervisor is
+    // still parked on the sync pipe. Waiting for the ready byte here means the
+    // target never sees a half-configured interface. Never do this when the
+    // supervisor shares the host netns: that would create a tap on the host.
+    let mut slirp = if network_isolated {
+        maybe_start_network(&session, child_pid)
+    } else {
+        eprintln!(
+            "burnbox-core: warning: no private network namespace; slirp4netns not started"
+        );
+        None
+    };
+
     let signal = if maps_ok { b'G' } else { b'F' };
     if let Err(error) = fd_write(&sync_write, &[signal]) {
         eprintln!("burnbox-core: cannot signal child namespace: {error}");
@@ -486,6 +552,7 @@ fn main() {
     let status = loop {
         if INTERRUPTED.load(Ordering::SeqCst) {
             eprintln!("burnbox-core: interrupted by signal; scrubbing workspace");
+            stop_network(&mut slirp);
             emergency_cleanup(&session, child_pid);
             emit_status("wiped", child_pid, &session.mount_point);
             process::exit(EXIT_RUNTIME);
@@ -504,6 +571,7 @@ fn main() {
         }
     };
 
+    stop_network(&mut slirp);
     if let Err(error) = zeroize_and_remove_workspace(&session.mount_point) {
         eprintln!("burnbox-core: cannot scrub RAM workspace: {error}");
     }
