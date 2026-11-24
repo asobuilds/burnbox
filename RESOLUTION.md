@@ -41,3 +41,14 @@
 - 2026-11-24 (Networking limitation): Unprivileged CLONE_NEWNET cannot bridge to host network
   without sudo (no veth creation). "Online" mode provides loopback only; live URL fetching
   requires rootless networking tools (slirp4netns) not yet integrated.
+- 2026-11-24 (M8 HOST INCIDENT): /usr/bin/firefox on this Ubuntu is a snap shell wrapper;
+  its setuid snap-confine fails (cap_dac_override absent under unprivileged userns) -> rc=1
+  EVEN WITH seccomp disabled. NOT a BurnBox/seccomp defect. Fix = resolve the NATIVE ELF
+  (/snap/firefox/current/usr/lib/firefox/firefox) which exits 0 under --seccomp-strict.
+  viewer_strict.rs auto-discovers native; Go viewer routing must too (M9).
+- 2026-11-24 (M8): slirp4netns integrated rootless (spawn after uid/gid map, before exec;
+  teardown on normal+signal paths; never started if CLONE_NEWNET denied). Absent slirp =>
+  loopback-only + stderr warning, exit 0 (production path; dev HTTP-200 used a /tmp rig,
+  not reproducible on fresh clone).
+- 2026-11-24 (M8): release.sh doctor demoted to advisory (headless/missing-Xephyr hosts no
+  longer abort the pipeline). Version single-source internal/version=0.8.0.

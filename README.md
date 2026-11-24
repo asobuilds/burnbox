@@ -41,3 +41,16 @@ Run `./scripts/install.sh` (no sudo) to copy binaries to `~/.local/bin/` and reg
 - **M1–M6** shipped
 - **M7** Strict seccomp (Firefox-validated) · `release.sh` · CHANGELOG — **shipped**
 - **M8** Rootless networking (slirp4netns) + final GUI acceptance test — next
+
+## Milestone 8 — Rootless networking + acceptance (shipped 2026-11-24)
+- **Live URLs (optional):** if `slirp4netns` is on PATH (or `BURNBOX_SLIRP4NETNS` set), `--mode online` gets user-space TCP/IP inside the netns — no sudo. Without it, graceful loopback-only + warning.
+- **Strict mode proven:** `--seccomp-strict` allow-list validated against the **native** Firefox ELF (exit 0, real screenshot). `/usr/bin/firefox` is a broken snap shim on Ubuntu — see Known Limits.
+- **One-command release:** `./scripts/release.sh` (doctor advisory) + `./scripts/acceptance.sh` (3/3).
+
+### Known Limitations
+- **Snap Firefox shim:** on Ubuntu hosts where `/usr/bin/firefox` is a snap wrapper, sandboxed launch fails with rc=1 (snap-confine capability issue, not seccomp). Use a native Firefox/Chromium build, or wait for M9 viewer auto-discovery.
+
+### Milestone status
+- **M1–M7** shipped
+- **M8** slirp4netns rootless networking · strict-vs-native-Firefox proof · acceptance.sh · doctor-advisory release — **shipped**
+- **M9** Viewer auto-discovery (snap/native/alt-browser) + live Wayland/Xephyr GUI smoke test — next

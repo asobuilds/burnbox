@@ -54,3 +54,7 @@ go test ./... && go build -o bin/burnbox ./cmd/burnbox
 ## Milestone 7 status (2026-11-24) — shipped
 - Agent A: Strict allow-list validated against real Firefox (strace-based discovery). viewer_strict.rs integration test added.
 - Agent B: release.sh orchestrator, CHANGELOG.md, internal/version single source.
+
+## Milestone 8 status (2026-11-24) — shipped
+- Agent A: src/network.rs slirp4netns (rootless, guarded, dual teardown) + BURNBOX_SECCOMP_DIAG + native-ELF strict proof. Only sandbox-core/** touched.
+- Agent B: acceptance.sh, release.sh doctor-advisory, version 0.8.0 single-source, open URL arg-parse fix.
