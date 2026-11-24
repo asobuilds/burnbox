@@ -9,22 +9,42 @@ import (
 	"burnbox/internal/cli"
 )
 
+// Version set via ldflags during build.
+// Example: go build -ldflags "-X main.version=0.5.0"
+var Version = "0.5.0"
+
+// Print friendly usage banner when no args or --help
+func printUsage() {
+	fmt.Println("BurnBox - Unprivileged namespace sandbox and RAM wipe engine")
+	fmt.Println()
+	fmt.Println("Usage:")
+	fmt.Println("  burnbox open <file-or-url> [--offline] [--ram <mb>] [--copy-in <host_path>...]")
+	fmt.Println("  burnbox open <url> [--offline] [--ram <mb>]")
+	fmt.Println()
+	fmt.Println("Flags:")
+	fmt.Println("  --offline, -o    Run in offline mode (no network namespace)")
+	fmt.Println("  --ram <mb>       Size of the tmpfs RAM directory in mebibytes (default: 512)")
+	fmt.Println("  --copy-in        Repeatable. Stage a host file into the sandbox workspace.")
+	fmt.Println()
+	fmt.Println("Try 'burnbox open <file>' to get started.")
+	fmt.Println("💡 Tip: Run ./scripts/install.sh to add BurnBox to your 'Open With' context menu.")
+}
+
+// Print version and exit
+func printVersion() {
+	fmt.Printf("BurnBox v%s\n", Version)
+	os.Exit(0)
+}
+
 func main() {
+	// Print version and exit
+	if len(os.Args) > 1 && (os.Args[1] == "--version" || os.Args[1] == "-v") {
+		printVersion()
+	}
+
 	// Print friendly usage banner when no args or --help
 	if len(os.Args) < 2 || os.Args[1] == "--help" || os.Args[1] == "-h" {
-		fmt.Println("BurnBox - Unprivileged namespace sandbox and RAM wipe engine")
-		fmt.Println()
-		fmt.Println("Usage:")
-		fmt.Println("  burnbox open <file-or-url> [--offline] [--ram <mb>] [--copy-in <host_path>...]")
-		fmt.Println("  burnbox open <url> [--offline] [--ram <mb>]")
-		fmt.Println()
-		fmt.Println("Flags:")
-		fmt.Println("  --offline, -o    Run in offline mode (no network namespace)")
-		fmt.Println("  --ram <mb>       Size of the tmpfs RAM directory in mebibytes (default: 512)")
-		fmt.Println("  --copy-in        Repeatable. Stage a host file into the sandbox workspace.")
-		fmt.Println()
-		fmt.Println("Try 'burnbox open <file>' to get started.")
-		fmt.Println("💡 Tip: Run ./scripts/install.sh to add BurnBox to your 'Open With' context menu.")
+		printUsage()
 		os.Exit(0)
 	}
 

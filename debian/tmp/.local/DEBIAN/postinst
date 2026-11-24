@@ -1,0 +1,16 @@
+#!/bin/sh
+# postinst: register MIME types and desktop entries for the current user
+set -e
+
+# Update desktop database for the user's local application directory
+if [ -x /usr/bin/update-desktop-database ]; then
+    update-desktop-database "$HOME/.local/share/applications/" 2>/dev/null || true
+fi
+
+# Set MIME types as default for BurnBox if not already set
+MIME_TYPES="application/pdf;application/zip;application/x-html;text/html;application/vnd.openxmlformats-officedocument.wordprocessingml.document;"
+if [ -x /usr/bin/xdg-mime ]; then
+    xdg-mime default burnbox.desktop "$MIME_TYPES" 2>/dev/null || true
+fi
+
+exit 0
