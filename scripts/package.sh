@@ -60,7 +60,7 @@ cp "$PROJECT_DIR/packaging/burnbox.desktop" "$PKG_BUILD_DIR/usr/local/share/appl
 # Create DEBIAN/control
 cat > "$PKG_BUILD_DIR/DEBIAN/control" <<EOF
 Package: burnbox
-Version: 0.6.0
+Version: 0.7.0
 Section: utils
 Architecture: amd64
 Priority: optional
@@ -92,9 +92,10 @@ POSTINST_EOF
 chmod +x "$PKG_BUILD_DIR/DEBIAN/postinst"
 
 # Build the .deb package
-DEB_PATH="$RELEASE_DIR/burnbox_0.6.0_amd64.deb"
+DEB_PATH="$RELEASE_DIR/burnbox_0.7.0_amd64.deb"
 dpkg-deb --build "$PKG_BUILD_DIR" "$DEB_PATH"
 
 echo "Created: $DEB_PATH"
+echo "Created: $TGZ_PATH"
 echo "Packaging complete. Outputs in $RELEASE_DIR/"
 echo "💡 Recommendation: Run 'burnbox doctor' to verify your host setup is suitable for sandboxing."

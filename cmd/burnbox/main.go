@@ -7,11 +7,8 @@ import (
 	"syscall"
 
 	"burnbox/internal/cli"
+	"burnbox/internal/version"
 )
-
-// Version set via ldflags during build.
-// Example: go build -ldflags "-X main.version=0.6.0"
-var Version = "0.6.0"
 
 // Print friendly usage banner when no args or --help
 func printUsage() {
@@ -37,7 +34,7 @@ func printUsage() {
 
 // Print version and exit
 func printVersion() {
-	fmt.Printf("BurnBox v%s\n", Version)
+	fmt.Printf("%s\n", version.PrintVersion())
 	os.Exit(0)
 }
 
@@ -57,11 +54,6 @@ type doctorCheckSummary struct {
 
 // doctorMain runs the doctor subcommand and returns the exit code.
 func doctorMain() int {
-	// Run the doctor checks using the (possibly overridden) check function
-	// We need to capture the results. Since defaultDoctorCheckFunc prints directly,
-	// we use the ForTestDoctorCheck mechanism for testability.
-	// For production use, we just run the default checks.
-
 	// Print the doctor banner
 	printDoctorBanner()
 
