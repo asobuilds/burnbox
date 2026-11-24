@@ -4,7 +4,8 @@
 //! `seccomp(2)` through `libc`, so no `libseccomp` development package or sudo
 //! is required. Setting `PR_SET_NO_NEW_PRIVS` first allows an unprivileged
 //! process to install the filter. Any syscall not listed below is allowed;
-//! blocked syscalls (and any unexpected architecture) terminate the process.
+//! blocked syscalls (and any unexpected architecture) terminate the process
+//! with `SECCOMP_RET_KILL_PROCESS`, which the supervisor maps to exit code 3.
 
 use nix::errno::Errno;
 use nix::libc;
@@ -41,61 +42,33 @@ const AUDIT_ARCH: u32 = 0xc000_00f3;
 )))]
 compile_error!("burnbox-core seccomp filter does not know this architecture");
 
-/// Syscalls denied to the target. `mount` reinforces the AppArmor boundary;
-/// the remaining calls are kernel-module loading, kexec and ptrace escape
-/// primitives.
-#[cfg(target_arch = "x86_64")]
+/// Syscalls denied to the target with `SECCOMP_RET_KILL_PROCESS`.
+///
+/// The list covers kernel-module loading and kexec, ptrace/introspection,
+/// cross-process memory reads/writes, file-handle and fanotify access,
+/// BPF/perf/userfaultfd primitives, and mount operations (which reinforce the
+/// AppArmor boundary). These constants exist on every architecture supported
+/// by this crate.
 fn blocked_syscalls() -> &'static [libc::c_long] {
     &[
+        // Kernel manipulation and escape primitives.
         libc::SYS_ptrace,
         libc::SYS_init_module,
         libc::SYS_finit_module,
         libc::SYS_kexec_load,
+        // Mount operations (AppArmor backup).
         libc::SYS_mount,
-    ]
-}
-
-#[cfg(target_arch = "aarch64")]
-fn blocked_syscalls() -> &'static [libc::c_long] {
-    &[
-        libc::SYS_ptrace,
-        libc::SYS_init_module,
-        libc::SYS_finit_module,
-        libc::SYS_kexec_load,
-        libc::SYS_mount,
-    ]
-}
-
-#[cfg(target_arch = "x86")]
-fn blocked_syscalls() -> &'static [libc::c_long] {
-    &[
-        libc::SYS_ptrace,
-        libc::SYS_init_module,
-        libc::SYS_finit_module,
-        libc::SYS_kexec_load,
-        libc::SYS_mount,
-    ]
-}
-
-#[cfg(target_arch = "arm")]
-fn blocked_syscalls() -> &'static [libc::c_long] {
-    &[
-        libc::SYS_ptrace,
-        libc::SYS_init_module,
-        libc::SYS_finit_module,
-        libc::SYS_kexec_load,
-        libc::SYS_mount,
-    ]
-}
-
-#[cfg(target_arch = "riscv64")]
-fn blocked_syscalls() -> &'static [libc::c_long] {
-    &[
-        libc::SYS_ptrace,
-        libc::SYS_init_module,
-        libc::SYS_finit_module,
-        libc::SYS_kexec_load,
-        libc::SYS_mount,
+        libc::SYS_umount2,
+        // Introspection / kernel subsystems.
+        libc::SYS_bpf,
+        libc::SYS_perf_event_open,
+        libc::SYS_userfaultfd,
+        libc::SYS_kcmp,
+        libc::SYS_process_vm_readv,
+        libc::SYS_process_vm_writev,
+        libc::SYS_name_to_handle_at,
+        libc::SYS_open_by_handle_at,
+        libc::SYS_fanotify_init,
     ]
 }
 
@@ -192,6 +165,27 @@ mod tests {
         assert_eq!(program[2].k, SECCOMP_DATA_NR_OFFSET);
         assert_eq!(program[kill_index - 1].k, SECCOMP_RET_ALLOW);
         assert_eq!(program[kill_index].k, SECCOMP_RET_KILL_PROCESS);
+
+        // Explicitly assert every syscall required by the Milestone 5 contract.
+        for syscall in [
+            libc::SYS_bpf,
+            libc::SYS_perf_event_open,
+            libc::SYS_userfaultfd,
+            libc::SYS_kcmp,
+            libc::SYS_process_vm_readv,
+            libc::SYS_process_vm_writev,
+            libc::SYS_name_to_handle_at,
+            libc::SYS_open_by_handle_at,
+            libc::SYS_fanotify_init,
+            libc::SYS_ptrace,
+            libc::SYS_init_module,
+            libc::SYS_finit_module,
+            libc::SYS_kexec_load,
+            libc::SYS_mount,
+            libc::SYS_umount2,
+        ] {
+            assert!(blocked.contains(&syscall), "missing blocked syscall {syscall}");
+        }
 
         for (offset, syscall) in blocked.iter().enumerate() {
             let instruction = program[3 + offset];

@@ -52,15 +52,22 @@ filter via raw `seccomp(2)` (no `libseccomp` system dependency). `PR_SET_NO_NEW_
 is set first so unprivileged installation is permitted. The filter kills the
 process on:
 
-- `ptrace`
-- `init_module`, `finit_module`
-- `kexec_load`
-- `mount` (reinforces the AppArmor boundary)
+- `ptrace`, `kcmp`, `process_vm_readv`, `process_vm_writev`
+- `init_module`, `finit_module`, `kexec_load`
+- `bpf`, `perf_event_open`, `userfaultfd`
+- `name_to_handle_at`, `open_by_handle_at`, `fanotify_init`
+- `mount`, `umount2` (reinforce the AppArmor boundary)
 
 Any other syscall is allowed. An unexpected architecture also terminates the
 process. Failure to install the filter returns exit code `3` and the target is
 never executed; a target killed by the filter (`SIGSYS`) also makes the session
 exit with code `3`.
+
+The optional `--seccomp-strict` flag establishes the contract for a future,
+stricter profile. Passing it logs a warning that complex GUI apps may break;
+for now it applies the same expanded deny-list (no extra restrictions such as
+socket-family filtering or `clone3` blocking). The flag is parsed by both
+`burnbox-core` and the Go orchestrator without changing JSON output.
 
 ## stdout / exit contract
 

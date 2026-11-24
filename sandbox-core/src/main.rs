@@ -60,6 +60,8 @@ struct Session {
     target_args: Vec<String>,
     /// Host paths staged into the RAM workspace before exec (basename kept).
     copy_in: Vec<String>,
+    /// Contract placeholder for the stricter (GUI-breaking) seccomp profile.
+    seccomp_strict: bool,
     mount_point: PathBuf,
 }
 
@@ -96,6 +98,12 @@ fn build_cli() -> Command {
                 .help("Copy a host file into the RAM workspace (repeatable; basename preserved, mode 0600)"),
         )
         .arg(
+            Arg::new("seccomp-strict")
+                .long("seccomp-strict")
+                .action(clap::ArgAction::SetTrue)
+                .help("Request the stricter seccomp profile (warning: may break complex GUI apps)"),
+        )
+        .arg(
             Arg::new("target-args")
                 .num_args(0..)
                 .trailing_var_arg(true)
@@ -125,6 +133,7 @@ fn session_from_matches(matches: &clap::ArgMatches, mount_point: PathBuf) -> Ses
             .get_many::<String>("copy-in")
             .map(|values| values.cloned().collect())
             .unwrap_or_default(),
+        seccomp_strict: matches.get_flag("seccomp-strict"),
         mount_point,
     }
 }
@@ -454,6 +463,14 @@ fn write_proc_file(path: &str, value: &str) -> io::Result<()> {
 /// Supervisor running inside the new user, mount and PID namespaces.
 /// The parent has already installed the uid/gid maps before this function runs.
 fn run_sandbox(session: &Session) -> i32 {
+    if session.seccomp_strict {
+        // The flag establishes the CLI contract now; a stricter profile (for
+        // example restricting socket families or clone3) can be added later.
+        eprintln!(
+            "burnbox-core: warning: --seccomp-strict may break complex GUI apps; applying the expanded default deny-list (stricter profile is a contract placeholder)"
+        );
+    }
+
     // Hard assertion for offline sessions: CLONE_NEWNET was granted, but the
     // kernel must actually show an isolated network (loopback only).
     if session.mode == "offline"
@@ -797,6 +814,7 @@ mod tests {
             target: "/bin/true".to_string(),
             target_args: Vec::new(),
             copy_in: Vec::new(),
+            seccomp_strict: false,
             mount_point: PathBuf::from("/dev/shm/burnbox-42"),
         };
         let environment = build_environment(&session);
@@ -822,6 +840,7 @@ mod tests {
             target: "/bin/true".to_string(),
             target_args: Vec::new(),
             copy_in: Vec::new(),
+            seccomp_strict: false,
             mount_point: root.clone(),
         };
 
@@ -855,6 +874,28 @@ mod tests {
             vec!["/tmp/first.pdf", "/tmp/second.pdf"]
         );
         assert_eq!(session.target_args, vec!["first.pdf"]);
+    }
+
+    #[test]
+    fn seccomp_strict_flag_is_optional_and_parsed() {
+        let base = [
+            "burnbox-core",
+            "--mode",
+            "online",
+            "--ram-mb",
+            "16",
+            "--target",
+            "/bin/true",
+        ];
+        let default_matches = build_cli().try_get_matches_from(base).expect("default CLI");
+        assert!(!session_from_matches(&default_matches, PathBuf::from("/tmp/mnt")).seccomp_strict);
+
+        let mut strict_args = base.to_vec();
+        strict_args.push("--seccomp-strict");
+        let strict_matches = build_cli()
+            .try_get_matches_from(strict_args)
+            .expect("strict CLI");
+        assert!(session_from_matches(&strict_matches, PathBuf::from("/tmp/mnt")).seccomp_strict);
     }
 
     #[test]
@@ -892,6 +933,7 @@ mod tests {
             target: "/bin/true".to_string(),
             target_args: Vec::new(),
             copy_in: vec![source.to_string_lossy().into_owned()],
+            seccomp_strict: false,
             mount_point: workspace.clone(),
         };
         copy_in_files(&session).expect("stage copy-in file");
