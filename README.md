@@ -18,3 +18,13 @@ Run `./scripts/install.sh` (no sudo) to copy binaries to `~/.local/bin/` and reg
 - **M3** Offline `CLONE_NEWNET` · Seccomp-BPF · `--copy-in` · smart routing · Xephyr probe — shipped
 - **M4** Desktop integration (`.desktop` + `xdg-mime`) + user-space `install.sh` — **shipped**
 - **M5** Seccomp allow-list hardening + packaging artifacts (.deb/AppImage) — next
+
+## Milestone 6 — Signal-safe scrub + strict seccomp + doctor (shipped 2026-11-24)
+- **No leak on kill:** `SIGTERM`/`SIGINT`/`SIGHUP`/`SIGPIPE` now run the zeroize+rmdir scrub (self-pipe pattern), so an interrupted session never leaves `/dev/shm/burnbox-*` behind.
+- **`--seccomp-strict`:** switches the filter from the deny-list to a ~120-syscall viewer allow-list (kill-by-default); logs a GUI-compat warning to stderr.
+- **`burnbox doctor`:** rootless host self-check (AppArmor fallback, `CLONE_NEWNET`, Xephyr, seccomp, viewer-on-PATH, `/dev/shm` writable) — run it after install.
+
+### Milestone status
+- **M1–M5** shipped
+- **M6** Signal-safe scrub · `--seccomp-strict` allow-list · `burnbox doctor` — **shipped**
+- **M7** End-to-end GUI validation + reproducible release pipeline — next

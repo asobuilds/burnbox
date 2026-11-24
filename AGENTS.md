@@ -46,3 +46,7 @@ go test ./... && go build -o bin/burnbox ./cmd/burnbox
 - Agent B delivered `scripts/install.sh` (user-space `~/.local/bin` + `xdg-mime`, no sudo) and the `cmd/burnbox/main.go` banner.
 - Agent A re-verified `sandbox-core` and republished `../bin/burnbox-core`.
 - Stray root-level `burnbox` binary de-tracked; `/burnbox` added to `.gitignore`.
+
+## Milestone 6 status (2026-11-24) — shipped
+- Agent A: signal-safe scrub (self-pipe) + real --seccomp-strict allow-list + BPF fall-through KILL fix + BPF-evaluator test. Only sandbox-core/** touched.
+- Agent B: burnbox doctor (6 checks, testable probe override) + banner wiring + script recommendations.

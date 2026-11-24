@@ -26,3 +26,10 @@
   Amendment v1.1: --copy-in moves staging authority into burnbox-core; Go wraps viewers.
   CLONE_NEWNET confirmed permitted unprivileged; Xephyr probe pending Wayland check.
 - 2026-11-23 (M4): Packaging moved fully user-space via scripts/install.sh (no sudo, ~/.local/bin, xdg-mime). Xephyr probed with soft fallback. Stray root binary de-tracked.
+- 2026-11-24 (M6): SIGTERM/SIGINT/SIGHUP/SIGPIPE now trigger the zeroize+rmdir scrub via a
+  self-pipe (handler sets flag; main loop scrubs) — killed sessions no longer leak
+  /dev/shm/burnbox-<pid>. Verified by integration test + runtime SIGTERM probe.
+- 2026-11-24 (M6 bug): --seccomp-strict allow-list had a classic-BPF fall-through landing on
+  ALLOW instead of KILL (silently permissive). Fixed; added BPF-evaluator unit test
+  (read->allow, ptrace/mount->kill, unlisted->kill) + getppid allow after strace showed /bin/sh killed.
+- 2026-11-24 (M6): burnbox doctor added (6 rootless host checks, testable probe override).
