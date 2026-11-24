@@ -32,3 +32,4 @@ xdg-mime default burnbox.desktop "$MIME_TYPES" 2>/dev/null || true
 update-desktop-database "$HOME/.local/share/applications/" 2>/dev/null || true
 
 echo "BurnBox installed to ~/.local/bin and registered as a safe 'Open With' handler."
+echo "💡 Recommendation: Run 'burnbox doctor' to verify your host setup is suitable for sandboxing."
