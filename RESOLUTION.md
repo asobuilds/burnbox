@@ -33,3 +33,11 @@
   ALLOW instead of KILL (silently permissive). Fixed; added BPF-evaluator unit test
   (read->allow, ptrace/mount->kill, unlisted->kill) + getppid allow after strace showed /bin/sh killed.
 - 2026-11-24 (M6): burnbox doctor added (6 rootless host checks, testable probe override).
+- 2026-11-24 (M7): --seccomp-strict allow-list validated against real Firefox/Evince via
+  iterative strace + SECCOMP_RET_ERRNO diagnostics. Added ~20 viewer-specific syscalls
+  (clone3, ipc, profile file ops, etc.). Dangerous primitives (ptrace, mount, bpf) remain killed.
+- 2026-11-24 (M7): release.sh orchestrates full pipeline (Rust->Go->test->package->doctor).
+  internal/version is the single source of truth for version strings.
+- 2026-11-24 (Networking limitation): Unprivileged CLONE_NEWNET cannot bridge to host network
+  without sudo (no veth creation). "Online" mode provides loopback only; live URL fetching
+  requires rootless networking tools (slirp4netns) not yet integrated.

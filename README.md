@@ -28,3 +28,16 @@ Run `./scripts/install.sh` (no sudo) to copy binaries to `~/.local/bin/` and reg
 - **M1–M5** shipped
 - **M6** Signal-safe scrub · `--seccomp-strict` allow-list · `burnbox doctor` — **shipped**
 - **M7** End-to-end GUI validation + reproducible release pipeline — next
+
+## Milestone 7 — Strict seccomp validated + Release pipeline (shipped 2026-11-24)
+- **Real GUI validation:** `--seccomp-strict` allow-list proven against native Firefox/Evince (exit 0, real screenshot). Dangerous syscalls still killed.
+- **One-command release:** `./scripts/release.sh` builds, tests, packages, and runs doctor.
+- **Version consistency:** `internal/version` is the single source of truth (overridden via ldflags).
+
+### Known Limitations
+- **Networking in sandbox:** Unprivileged network namespaces (`CLONE_NEWNET`) cannot reach the internet without `sudo` or `slirp4netns`. "Online" mode currently provides loopback only. Live URL fetching is limited until rootless networking is added.
+
+### Milestone status
+- **M1–M6** shipped
+- **M7** Strict seccomp (Firefox-validated) · `release.sh` · CHANGELOG — **shipped**
+- **M8** Rootless networking (slirp4netns) + final GUI acceptance test — next

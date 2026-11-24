@@ -50,3 +50,7 @@ go test ./... && go build -o bin/burnbox ./cmd/burnbox
 ## Milestone 6 status (2026-11-24) — shipped
 - Agent A: signal-safe scrub (self-pipe) + real --seccomp-strict allow-list + BPF fall-through KILL fix + BPF-evaluator test. Only sandbox-core/** touched.
 - Agent B: burnbox doctor (6 checks, testable probe override) + banner wiring + script recommendations.
+
+## Milestone 7 status (2026-11-24) — shipped
+- Agent A: Strict allow-list validated against real Firefox (strace-based discovery). viewer_strict.rs integration test added.
+- Agent B: release.sh orchestrator, CHANGELOG.md, internal/version single source.
