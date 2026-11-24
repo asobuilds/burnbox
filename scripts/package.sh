@@ -27,21 +27,27 @@ if [ ! -f "$PROJECT_DIR/bin/burnbox-core" ]; then
 fi
 
 # Create release directory
+rm -rf "$RELEASE_DIR"/* 2>/dev/null || true
 mkdir -p "$RELEASE_DIR"
 
 # --- Build .tar.gz archive ---
 
-# Collect all files for the tar.gz
-TGZ_PATH="$RELEASE_DIR/burnbox_$(date +%Y%m%d%H%M).tar.gz"
+# Tarball layout:
+#   bin/burnbox
+#   bin/burnbox-core
+#   install.sh
+#   packaging/burnbox.desktop
+TGZ_PATH="$RELEASE_DIR/burnbox_${BURNBOX_VERSION}_amd64.tar.gz"
 
-mkdir -p "$PROJECT_DIR/tmp_package"
-cp "$PROJECT_DIR/bin/burnbox" "$PROJECT_DIR/tmp_package/"
-cp "$PROJECT_DIR/bin/burnbox-core" "$PROJECT_DIR/tmp_package/"
+mkdir -p "$PROJECT_DIR/tmp_package/bin"
+mkdir -p "$PROJECT_DIR/tmp_package/packaging"
+cp "$PROJECT_DIR/bin/burnbox" "$PROJECT_DIR/tmp_package/bin/"
+cp "$PROJECT_DIR/bin/burnbox-core" "$PROJECT_DIR/tmp_package/bin/"
 cp "$PROJECT_DIR/scripts/install.sh" "$PROJECT_DIR/tmp_package/"
-cp "$PROJECT_DIR/packaging/burnbox.desktop" "$PROJECT_DIR/tmp_package/"
+cp "$PROJECT_DIR/packaging/burnbox.desktop" "$PROJECT_DIR/tmp_package/packaging/"
 
 cd "$PROJECT_DIR/tmp_package"
-tar czf "$TGZ_PATH" burnbox install.sh burnbox.desktop
+tar czf "$TGZ_PATH" bin/ install.sh packaging/burnbox.desktop
 cd "$PROJECT_DIR"
 rm -rf "$PROJECT_DIR/tmp_package"
 
@@ -57,11 +63,11 @@ mkdir -p "$PKG_BUILD_DIR/DEBIAN"
 mkdir -p "$PKG_BUILD_DIR/usr/local/bin"
 mkdir -p "$PKG_BUILD_DIR/usr/local/share/applications"
 
-# Copy binaries to the package structure
+# Copy binaries to the package structure (/usr/local/bin)
 cp "$PROJECT_DIR/bin/burnbox" "$PKG_BUILD_DIR/usr/local/bin/"
 cp "$PROJECT_DIR/bin/burnbox-core" "$PKG_BUILD_DIR/usr/local/bin/"
 
-# Copy desktop entry to the package structure
+# Copy desktop entry to the package structure (/usr/local/share/applications)
 cp "$PROJECT_DIR/packaging/burnbox.desktop" "$PKG_BUILD_DIR/usr/local/share/applications/"
 
 # Create DEBIAN/control using dynamically-determined version
@@ -76,19 +82,19 @@ Description: Unprivileged namespace sandbox and RAM wipe engine
 Homepage: https://github.com/burnbox/burnbox
 EOF
 
-# Create postinst script (user-space only, no sudo)
+# Create postinst script (no sudo, runs as root during install)
 cat > "$PKG_BUILD_DIR/DEBIAN/postinst" <<'POSTINST_EOF'
 #!/bin/sh
-# postinst: register MIME types and desktop entries for the current user
+# postinst: register MIME types and desktop entries (runs as root during .deb install)
 set -e
 
-# Update desktop database for the user's local application directory
+# Update desktop database for system-wide application directory
 if [ -x /usr/bin/update-desktop-database ]; then
-    update-desktop-database "$HOME/.local/share/applications/" 2>/dev/null || true
+    update-desktop-database /usr/local/share/applications/ 2>/dev/null || true
 fi
 
 # Set MIME types as default for BurnBox if not already set
-MIME_TYPES="application/pdf;application/zip;application/x-html;text/html;application/vnd.openxmlformats-officedocument.wordprocessingml.document;"
+MIME_TYPES="application/pdf;application/zip;text/html;application/vnd.openxmlformats-officedocument.wordprocessingml.document;x-scheme-handler/http;x-scheme-handler/https;"
 if [ -x /usr/bin/xdg-mime ]; then
     xdg-mime default burnbox.desktop "$MIME_TYPES" 2>/dev/null || true
 fi

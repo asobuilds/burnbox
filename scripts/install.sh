@@ -3,11 +3,12 @@ set -euo pipefail
 
 # Zero-sudo setup script for BurnBox
 # Installs binaries and registers 'Open With' context menu handler
+# Expects tarball-extracted layout: bin/burnbox, bin/burnbox-core
 
-BURNBOX_BIN="./bin/burnbox"
-BURNBOX_CORE="./bin/burnbox-core"
+BURNBOX_BIN="bin/burnbox"
+BURNBOX_CORE="bin/burnbox-core"
 
-# Check that binaries exist
+# Check that binaries exist (relative to current dir)
 if [ ! -f "$BURNBOX_BIN" ] || [ ! -f "$BURNBOX_CORE" ]; then
     echo "Error: bin/burnbox and bin/burnbox-core must exist in the current directory." >&2
     exit 1
@@ -25,7 +26,7 @@ cp "$BURNBOX_CORE" "$HOME/.local/bin/burnbox-core"
 cp packaging/burnbox.desktop "$HOME/.local/share/applications/burnbox.desktop"
 
 # Register as default handler for supported MIME types
-MIME_TYPES="application/pdf;application/zip;application/x-html;text/html;application/vnd.openxmlformats-officedocument.wordprocessingml.document;"
+MIME_TYPES="application/pdf;application/zip;text/html;application/vnd.openxmlformats-officedocument.wordprocessingml.document;x-scheme-handler/http;x-scheme-handler/https;"
 xdg-mime default burnbox.desktop "$MIME_TYPES" 2>/dev/null || true
 
 # Update desktop database

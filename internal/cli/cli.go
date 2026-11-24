@@ -119,9 +119,11 @@ func handleOpen(args []string) error {
 		cmdArgs = append(cmdArgs, "--target", "xdg-open", "--", filepath.Base(target))
 	}
 
-	// Find burnbox-core binary relative to the executable directory
-	exeDir := filepath.Dir(os.Args[0])
-	corePath := filepath.Join(exeDir, "burnbox-core")
+	// Find burnbox-core binary using robust lookup:
+	// 1. Check PATH via exec.LookPath("burnbox-core")
+	// 2. Fallback to ~/.local/bin/burnbox-core
+	// 3. Fallback to ./bin/burnbox-core
+	corePath := resolveCorePath()
 
 	// Set up display (Xephyr probe or host DISPLAY)
 	display := setupXephyrDisplay()
@@ -487,6 +489,26 @@ func checkDevSHMWritable() bool {
 	// Clean up
 	os.Remove(testFile)
 	return true
+}
+
+// resolveCorePath locates burnbox-core using a robust lookup order:
+// 1. exec.LookPath("burnbox-core") on PATH
+// 2. ~/.local/bin/burnbox-core (install.sh target)
+// 3. ./bin/burnbox-core (build output target)
+func resolveCorePath() string {
+	// 1. Check PATH
+	if path, err := exec.LookPath("burnbox-core"); err == nil {
+		return path
+	}
+	// 2. Check ~/.local/bin/burnbox-core
+	if home, err := os.UserHomeDir(); err == nil {
+		localPath := filepath.Join(home, ".local", "bin", "burnbox-core")
+		if _, err := os.Stat(localPath); err == nil {
+			return localPath
+		}
+	}
+	// 3. Fallback to ./bin/burnbox-core
+	return "./bin/burnbox-core"
 }
 
 // checkSlirp4netnsAvailable checks if slirp4netns is available for online URL fetching.

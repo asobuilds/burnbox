@@ -4,4 +4,4 @@ Comment=Run executables in an unprivileged namespace sandbox
 Exec=burnbox open %F
 Terminal=true
 Type=Application
-MimeType=application/pdf;application/zip;application/x-html;text/html;application/vnd.openxmlformats-officedocument.wordprocessingml.document;
+MimeType=application/pdf;application/zip;text/html;application/vnd.openxmlformats-officedocument.wordprocessingml.document;x-scheme-handler/http;x-scheme-handler/https;

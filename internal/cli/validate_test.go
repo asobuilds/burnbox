@@ -26,7 +26,7 @@ func TestDesktopFileValidation(t *testing.T) {
 	}
 
 	// Check MimeType line contains expected types (all on one line separated by semicolons)
-	mimeLine := "MimeType=application/pdf;application/zip;application/x-html;text/html;application/vnd.openxmlformats-officedocument.wordprocessingml.document;"
+	mimeLine := "MimeType=application/pdf;application/zip;text/html;application/vnd.openxmlformats-officedocument.wordprocessingml.document;x-scheme-handler/http;x-scheme-handler/https;"
 	if !strings.Contains(content, mimeLine) {
 		t.Fatalf("desktop file missing expected MimeType line")
 	}
