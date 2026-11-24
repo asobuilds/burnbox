@@ -103,6 +103,36 @@ visible in the sandbox, so a link to `/etc/hostname` would leak the same file
 once the target followed it. `tests/copy_in_symlink.rs` covers direct and
 intermediate symlinks plus a regular-file control.
 
+## Optional filesystem jail, fresh `/proc` and rlimits (Milestone 11)
+
+`--fs-jail` is **opt-in and off by default** so existing viewers keep their
+current view of the filesystem. When enabled, the supervisor builds a minimal
+rootfs under `/dev/shm`: a fresh tmpfs `/`, read-only bind mounts of `/usr`,
+`/lib`, `/lib64` and `/bin` for the loader and binaries, a fresh tmpfs `/dev`
+and `/tmp`, a fresh `procfs` mounted with `hidepid=2,gid=0`, and the RAM
+workspace rebound at `/sandbox`. It then `pivot_root`s into that tree **before**
+forking the target, so host `/etc`, `/var`, `/run` and the host process table
+are unreachable. The target's cwd, `HOME`, `TMPDIR` and `PWD` point at `/sandbox`.
+
+Some hosts (notably Ubuntu with AppArmor's `unprivileged_userns` profile) deny
+`mount(2)`/`pivot_root` inside user namespaces. In that case BurnBox prints a
+warning such as `--fs-jail could not pivot_root ... falling back to overlay
+behavior` and continues with the existing overlay path; the flag never turns a
+host policy denial into a hard session failure. `tests/fs_jail_timeout.rs`
+asserts both branches: a real jail must hide `/etc/hostname`, while a fallback
+must stay viewer-compatible and still expose staged files.
+
+Independently of `--fs-jail`, the supervisor attempts to mount a fresh procfs
+for its new PID namespace with `hidepid=2,gid=0`. Kernels without `hidepid`
+fall back to a plain fresh procfs; LSM denials only warn.
+
+Immediately before `execve` the target receives `RLIMIT_NPROC` and `RLIMIT_AS`
+(derived from `--ram-mb` with a generous floor so Firefox's nested sandbox
+still works). `--timeout <secs>` defaults to `0` (disabled); when set it also
+installs `RLIMIT_CPU` and the supervisor sends `SIGKILL` after the wall-clock
+deadline. A timed-out session exits `1` after the normal zeroize scrub, and
+stdout remains exactly the two contract JSON lines.
+
 ## Seccomp-BPF
 
 Immediately before `execve`, the target process installs a small classic-BPF

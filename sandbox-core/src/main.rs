@@ -21,7 +21,15 @@
 //! workspace (mode 0600) with the target's cwd set there, so they are inside
 //! the zeroize scrub boundary. The parent catches SIGTERM/SIGINT/SIGHUP/SIGPIPE
 //! and performs that same zeroize + rmdir scrub before exiting as interrupted.
+//!
+//! Milestone 11 adds an opt-in `--fs-jail` (minimal read-only rootfs with
+//! `pivot_root`, falling back with a warning when the host LSM denies mounts),
+//! a fresh `hidepid=2,gid=0` procfs for the new PID namespace, and pre-exec
+//! rlimits (`RLIMIT_NPROC`, `RLIMIT_AS`, plus `RLIMIT_CPU` when `--timeout` is
+//! set). The supervisor enforces the wall-clock deadline with `SIGKILL` before
+//! the usual scrub. None of these change the two-line JSON/exit-code contract.
 
+mod fs_jail;
 mod network;
 mod seccomp;
 
@@ -45,7 +53,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Component, Path, PathBuf};
 use std::process;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use zeroize::Zeroize;
 
 /// Session ended cleanly and tmpfs was scrubbed/unmounted.
@@ -114,6 +122,10 @@ struct Session {
     copy_in: Vec<String>,
     /// Contract placeholder for the stricter (GUI-breaking) seccomp profile.
     seccomp_strict: bool,
+    /// Opt-in minimal rootfs with pivot_root (default off for viewer compat).
+    fs_jail: bool,
+    /// Wall-clock/CPU deadline in seconds; 0 disables the limit.
+    timeout_secs: u64,
     mount_point: PathBuf,
 }
 
@@ -156,6 +168,20 @@ fn build_cli() -> Command {
                 .help("Request the stricter seccomp profile (warning: may break complex GUI apps)"),
         )
         .arg(
+            Arg::new("fs-jail")
+                .long("fs-jail")
+                .action(clap::ArgAction::SetTrue)
+                .help("Opt into a read-only pivot_root filesystem jail (falls back with a warning if mounts are denied)"),
+        )
+        .arg(
+            Arg::new("timeout")
+                .long("timeout")
+                .value_name("SECS")
+                .value_parser(clap::value_parser!(u64))
+                .default_value("0")
+                .help("Kill the target after SECS wall-clock seconds (0 disables; also sets RLIMIT_CPU)"),
+        )
+        .arg(
             Arg::new("target-args")
                 .num_args(0..)
                 .trailing_var_arg(true)
@@ -186,6 +212,10 @@ fn session_from_matches(matches: &clap::ArgMatches, mount_point: PathBuf) -> Ses
             .map(|values| values.cloned().collect())
             .unwrap_or_default(),
         seccomp_strict: matches.get_flag("seccomp-strict"),
+        fs_jail: matches.get_flag("fs-jail"),
+        timeout_secs: *matches
+            .get_one::<u64>("timeout")
+            .expect("timeout has a default"),
         mount_point,
     }
 }
@@ -444,6 +474,54 @@ fn status_line(status: &str, pid: Pid, mount_point: &Path) -> String {
 fn emit_status(status: &str, pid: Pid, mount_point: &Path) {
     println!("{}", status_line(status, pid, mount_point));
     let _ = io::stdout().flush();
+}
+
+/// Address-space ceiling derived from the RAM budget: 256 times the RAM with
+/// a 16 GiB floor. Firefox reserves very large virtual mappings for its
+/// sandbox and JIT even when its resident set is small; this ceiling still
+/// bounds unbounded allocation loops without breaking real viewers.
+fn rlimit_as_bytes(ram_mb: u64) -> u64 {
+    ram_mb
+        .saturating_mul(256)
+        .max(16 * 1024)
+        .saturating_mul(1024 * 1024)
+}
+
+fn set_rlimit(
+    resource: libc::__rlimit_resource_t,
+    soft: u64,
+    hard: u64,
+    name: &str,
+) -> Result<(), String> {
+    let limit = libc::rlimit {
+        rlim_cur: soft as libc::rlim_t,
+        rlim_max: hard as libc::rlim_t,
+    };
+    // SAFETY: `resource` is a valid RLIMIT_* constant and `limit` initialized.
+    if unsafe { libc::setrlimit(resource, &limit) } != 0 {
+        return Err(format!("{name}: {}", io::Error::last_os_error()));
+    }
+    Ok(())
+}
+
+/// Apply resource ceilings to the target immediately before exec. These are
+/// irreversible in this process, so they must not be installed in the parent.
+fn install_rlimits(session: &Session) -> Result<(), String> {
+    // Firefox's nested content sandbox needs a generous process budget inside
+    // the user namespace; this still stops unbounded fork storms.
+    set_rlimit(libc::RLIMIT_NPROC, 4096, 4096, "RLIMIT_NPROC")?;
+    let as_bytes = rlimit_as_bytes(session.ram_mb);
+    set_rlimit(libc::RLIMIT_AS, as_bytes, as_bytes, "RLIMIT_AS")?;
+    if session.timeout_secs > 0 {
+        // CPU soft limit backs up the supervisor's wall-clock SIGKILL.
+        set_rlimit(
+            libc::RLIMIT_CPU,
+            session.timeout_secs,
+            session.timeout_secs.saturating_add(1),
+            "RLIMIT_CPU",
+        )?;
+    }
+    Ok(())
 }
 
 /// Try to give an `online` session user-mode networking. Any failure is
@@ -805,7 +883,7 @@ fn run_sandbox(session: &Session) -> i32 {
                 }
                 Err(error) => {
                     eprintln!("burnbox-core: cannot hide host /home: {error}");
-                    let _ = cleanup_mounts(session, ram_mounted, home_mounted);
+                    let _ = cleanup_mounts(session, ram_mounted, home_mounted, false, false);
                     return EXIT_SECURITY;
                 }
             }
@@ -813,42 +891,131 @@ fn run_sandbox(session: &Session) -> i32 {
         Ok(_) => {
             eprintln!("burnbox-core: /home is not a directory; cannot hide host home");
             if ram_mounted {
-                let _ = cleanup_mounts(session, ram_mounted, home_mounted);
+                let _ = cleanup_mounts(session, ram_mounted, home_mounted, false, false);
                 return EXIT_SECURITY;
             }
         }
         Err(error) => {
             eprintln!("burnbox-core: cannot inspect /home: {error}");
             if ram_mounted {
-                let _ = cleanup_mounts(session, ram_mounted, home_mounted);
+                let _ = cleanup_mounts(session, ram_mounted, home_mounted, false, false);
                 return EXIT_SECURITY;
             }
         }
     }
 
+    // Mount a fresh procfs for this PID namespace. `hidepid=2,gid=0` keeps host
+    // process cmdlines/environments unreadable even if a viewer falls back to
+    // the overlay path instead of the full filesystem jail. LSM denials are
+    // warnings, never session failures.
+    let mut proc_mounted = false;
+    match mount(
+        Some("proc"),
+        Path::new("/proc"),
+        Some("proc"),
+        MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+        Some(fs_jail::PROC_OPTIONS),
+    ) {
+        Ok(()) => proc_mounted = true,
+        Err(Errno::EINVAL) => {
+            // Kernels without hidepid still get a fresh, PID-namespaced /proc.
+            match mount::<str, Path, str, str>(
+                Some("proc"),
+                Path::new("/proc"),
+                Some("proc"),
+                MsFlags::MS_NOSUID | MsFlags::MS_NODEV,
+                None,
+            ) {
+                Ok(()) => {
+                    proc_mounted = true;
+                    eprintln!(
+                        "burnbox-core: warning: hidepid unsupported by kernel; using plain fresh /proc"
+                    );
+                }
+                Err(error) => eprintln!("burnbox-core: warning: fresh /proc unavailable: {error}"),
+            }
+        }
+        Err(Errno::EACCES) => eprintln!(
+            "burnbox-core: warning: fresh /proc denied by host policy; continuing with host /proc"
+        ),
+        Err(error) => eprintln!("burnbox-core: warning: fresh /proc unavailable: {error}"),
+    }
+
     // Stage host files after workspace/mount setup but before exec. Anything
     // placed here is inside the RAM workspace and will be scrubbed on exit.
+    // It must happen before pivot_root, which hides all host paths.
     if let Err(error) = copy_in_files(session) {
         eprintln!("burnbox-core: copy-in failed: {error}");
-        let _ = cleanup_mounts(session, ram_mounted, home_mounted);
+        let _ = cleanup_mounts(session, ram_mounted, home_mounted, proc_mounted, false);
         return EXIT_RUNTIME;
     }
 
+    // Optional filesystem jail. A host LSM that denies mount/pivot_root only
+    // produces a warning: the session continues with the overlay behavior.
+    let jail = if session.fs_jail {
+        if !ram_mounted {
+            eprintln!(
+                "burnbox-core: warning: --fs-jail requires a private RAM mount; host policy denied it, falling back to overlay behavior"
+            );
+            None
+        } else {
+            match fs_jail::Jail::setup(&session.mount_point, session.ram_mb) {
+                Ok(jail) => {
+                    eprintln!(
+                        "burnbox-core: fs-jail active (pivot_root; ro /usr /lib /lib64 /bin; fresh /dev /tmp /proc; workspace at {})",
+                        fs_jail::SANDBOX_PATH
+                    );
+                    Some(jail)
+                }
+                Err(error) => {
+                    eprintln!(
+                        "burnbox-core: warning: --fs-jail could not pivot_root ({error}); falling back to overlay behavior"
+                    );
+                    None
+                }
+            }
+        }
+    } else {
+        None
+    };
+    let jail_active = jail.as_ref().is_some_and(fs_jail::Jail::is_active);
+
     let target_pid = match unsafe { fork() } {
-        Ok(ForkResult::Child) => exec_target(session),
+        Ok(ForkResult::Child) => exec_target(session, jail_active),
         Ok(ForkResult::Parent { child }) => child,
         Err(error) => {
             eprintln!("burnbox-core: target fork failed: {error}");
-            let _ = cleanup_mounts(session, ram_mounted, home_mounted);
+            let _ = cleanup_mounts(session, ram_mounted, home_mounted, proc_mounted, jail_active);
+            if let Some(jail) = &jail {
+                jail.finish();
+            }
             return EXIT_RUNTIME;
         }
     };
 
     // This supervisor is PID 1 in the new PID namespace: reap every child,
-    // but stop waiting once the requested target has been reaped.
+    // but stop waiting once the requested target has been reaped. Poll so a
+    // wall-clock timeout can SIGKILL the target even when it sleeps or spins.
+    let deadline = (session.timeout_secs > 0)
+        .then(|| Instant::now() + Duration::from_secs(session.timeout_secs));
+    let mut timed_out = false;
     let mut target_status: Option<WaitStatus> = None;
     while target_status.is_none() {
-        match waitpid(Pid::from_raw(-1), None) {
+        match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => {
+                if let Some(deadline) = deadline
+                    && Instant::now() >= deadline
+                    && !timed_out
+                {
+                    eprintln!(
+                        "burnbox-core: timeout {}s elapsed; SIGKILL target",
+                        session.timeout_secs
+                    );
+                    let _ = kill(target_pid, Signal::SIGKILL);
+                    timed_out = true;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
             Ok(status) => {
                 if status.pid() == Some(target_pid) {
                     target_status = Some(status);
@@ -872,12 +1039,19 @@ fn run_sandbox(session: &Session) -> i32 {
         }
     }
 
-    if let Err(error) = cleanup_mounts(session, ram_mounted, home_mounted) {
+    if let Err(error) = cleanup_mounts(session, ram_mounted, home_mounted, proc_mounted, jail_active) {
         eprintln!("burnbox-core: cleanup failed: {error}");
         return EXIT_SECURITY;
     }
+    if let Some(jail) = &jail {
+        jail.finish();
+    }
 
-    session_exit_code(target_status)
+    if timed_out {
+        EXIT_RUNTIME
+    } else {
+        session_exit_code(target_status)
+    }
 }
 
 /// Map the target's terminal status to the AGREEMENT.md exit contract.
@@ -893,7 +1067,7 @@ fn session_exit_code(status: Option<WaitStatus>) -> i32 {
 
 /// Build an explicit environment that points HOME and TMPDIR at the RAM
 /// workspace without mutating global state after clone/fork.
-fn build_environment(session: &Session) -> Vec<CString> {
+fn build_environment(session: &Session, jail_active: bool) -> Vec<CString> {
     let mut environment = Vec::new();
     for (key, value) in std::env::vars_os() {
         if key == "HOME" || key == "TMPDIR" || key == "BURNBOX_MODE" {
@@ -906,7 +1080,16 @@ fn build_environment(session: &Session) -> Vec<CString> {
             environment.push(entry);
         }
     }
-    let workspace = session.mount_point.display();
+    // Inside the jail the host workspace path is gone; /sandbox is the same
+    // RAM mount rebound into the new root.
+    let workspace = if jail_active {
+        fs_jail::SANDBOX_PATH
+    } else {
+        session
+            .mount_point
+            .to_str()
+            .expect("workspace path is not valid UTF-8")
+    };
     environment.push(
         CString::new(format!("HOME={workspace}")).expect("workspace path cannot contain NUL"),
     );
@@ -926,10 +1109,23 @@ fn build_environment(session: &Session) -> Vec<CString> {
 }
 
 /// Replace the grandchild process with the user's target executable.
-fn exec_target(session: &Session) -> ! {
+fn exec_target(session: &Session, jail_active: bool) -> ! {
+    // Resource ceilings must be installed before the seccomp filter: a strict
+    // allow-list may not include setrlimit, and they are irreversible here.
+    if let Err(error) = install_rlimits(session) {
+        eprintln!("burnbox-core: cannot install rlimits: {error}");
+        process::exit(EXIT_RUNTIME);
+    }
+
     // The target runs from the RAM workspace so staged files are directly
-    // addressable by basename (e.g. `xdg-open report.pdf`).
-    if let Err(error) = chdir(&session.mount_point) {
+    // addressable by basename (e.g. `xdg-open report.pdf`). After pivot_root
+    // that mount lives at /sandbox rather than its old host path.
+    let workspace = if jail_active {
+        Path::new(fs_jail::SANDBOX_PATH)
+    } else {
+        session.mount_point.as_path()
+    };
+    if let Err(error) = chdir(workspace) {
         eprintln!("burnbox-core: cannot enter RAM workspace: {error}");
         process::exit(EXIT_RUNTIME);
     }
@@ -960,7 +1156,7 @@ fn exec_target(session: &Session) -> ! {
         process::exit(EXIT_SECURITY);
     }
 
-    match execvpe(&target, &argv, &build_environment(session)) {
+    match execvpe(&target, &argv, &build_environment(session, jail_active)) {
         Err(error) => {
             eprintln!("burnbox-core: cannot execute {}: {error}", session.target);
             process::exit(EXIT_RUNTIME);
@@ -973,19 +1169,32 @@ fn exec_target(session: &Session) -> ! {
 /// remove the `/dev/shm` fallback directory) and the `/home` overlay. Mounts
 /// live only in this namespace; `MNT_DETACH` makes unmounting robust even if
 /// the target left files open.
-fn cleanup_mounts(session: &Session, ram_mounted: bool, home_mounted: bool) -> Result<(), String> {
+fn cleanup_mounts(
+    session: &Session,
+    ram_mounted: bool,
+    home_mounted: bool,
+    proc_mounted: bool,
+    jail_active: bool,
+) -> Result<(), String> {
     let mut errors = Vec::new();
 
-    if let Err(error) = zero_tree(&session.mount_point) {
+    // After pivot_root the host path of the workspace no longer resolves; the
+    // same RAM mount is visible at /sandbox inside the jail.
+    let workspace: &Path = if jail_active {
+        Path::new(fs_jail::SANDBOX_PATH)
+    } else {
+        &session.mount_point
+    };
+    if let Err(error) = zero_tree(workspace) {
         errors.push(format!("RAM wipe: {error}"));
     }
     if ram_mounted {
-        if let Err(error) = umount2(&session.mount_point, MntFlags::MNT_DETACH) {
+        if let Err(error) = umount2(workspace, MntFlags::MNT_DETACH) {
             errors.push(format!("RAM unmount: {error}"));
         }
     } else {
         // /dev/shm fallback: no mount to detach, remove the private directory.
-        match fs::remove_dir_all(&session.mount_point) {
+        match fs::remove_dir_all(workspace) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => {}
             Err(error) => errors.push(format!("RAM workspace removal: {error}")),
@@ -995,6 +1204,11 @@ fn cleanup_mounts(session: &Session, ram_mounted: bool, home_mounted: bool) -> R
         && let Err(error) = umount2(Path::new("/home"), MntFlags::MNT_DETACH)
     {
         errors.push(format!("/home overlay unmount: {error}"));
+    }
+    if proc_mounted
+        && let Err(error) = umount2(Path::new("/proc"), MntFlags::MNT_DETACH)
+    {
+        errors.push(format!("fresh /proc unmount: {error}"));
     }
 
     if errors.is_empty() {
@@ -1097,9 +1311,11 @@ mod tests {
             target_args: Vec::new(),
             copy_in: Vec::new(),
             seccomp_strict: false,
+            fs_jail: false,
+            timeout_secs: 0,
             mount_point: PathBuf::from("/dev/shm/burnbox-42"),
         };
-        let environment = build_environment(&session);
+        let environment = build_environment(&session, false);
         assert!(environment
             .iter()
             .any(|entry| entry.as_bytes() == b"HOME=/dev/shm/burnbox-42"));
@@ -1123,10 +1339,12 @@ mod tests {
             target_args: Vec::new(),
             copy_in: Vec::new(),
             seccomp_strict: false,
+            fs_jail: false,
+            timeout_secs: 0,
             mount_point: root.clone(),
         };
 
-        cleanup_mounts(&session, false, false).expect("fallback cleanup");
+        cleanup_mounts(&session, false, false, false, false).expect("fallback cleanup");
 
         assert!(!root.exists());
     }
@@ -1156,6 +1374,93 @@ mod tests {
             vec!["/tmp/first.pdf", "/tmp/second.pdf"]
         );
         assert_eq!(session.target_args, vec!["first.pdf"]);
+    }
+
+    #[test]
+    fn fs_jail_flag_is_opt_in() {
+        let base = [
+            "burnbox-core",
+            "--mode",
+            "online",
+            "--ram-mb",
+            "16",
+            "--target",
+            "/bin/true",
+        ];
+        let default_matches = build_cli().try_get_matches_from(base).expect("default CLI");
+        assert!(!session_from_matches(&default_matches, PathBuf::from("/tmp/mnt")).fs_jail);
+
+        let mut jail_args = base.to_vec();
+        jail_args.push("--fs-jail");
+        let jail_matches = build_cli().try_get_matches_from(jail_args).expect("jail CLI");
+        assert!(session_from_matches(&jail_matches, PathBuf::from("/tmp/mnt")).fs_jail);
+    }
+
+    #[test]
+    fn timeout_flag_defaults_off_and_is_parsed() {
+        let base = [
+            "burnbox-core",
+            "--mode",
+            "online",
+            "--ram-mb",
+            "16",
+            "--target",
+            "/bin/true",
+        ];
+        let default_matches = build_cli().try_get_matches_from(base).expect("default CLI");
+        assert_eq!(
+            session_from_matches(&default_matches, PathBuf::from("/tmp/mnt")).timeout_secs,
+            0
+        );
+
+        let timeout_matches = build_cli()
+            .try_get_matches_from([
+                "burnbox-core",
+                "--mode",
+                "online",
+                "--ram-mb",
+                "16",
+                "--timeout",
+                "7",
+                "--target",
+                "/bin/true",
+            ])
+            .expect("timeout CLI");
+        assert_eq!(
+            session_from_matches(&timeout_matches, PathBuf::from("/tmp/mnt")).timeout_secs,
+            7
+        );
+    }
+
+    #[test]
+    fn rlimits_scale_with_ram_budget() {
+        assert_eq!(rlimit_as_bytes(16), 16 * 1024 * 1024 * 1024);
+        assert_eq!(rlimit_as_bytes(512), 512 * 256 * 1024 * 1024);
+        assert!(rlimit_as_bytes(u64::MAX) >= rlimit_as_bytes(512));
+    }
+
+    #[test]
+    fn jail_environment_points_at_sandbox() {
+        let session = Session {
+            mode: "online".to_string(),
+            ram_mb: 16,
+            target: "/bin/true".to_string(),
+            target_args: Vec::new(),
+            copy_in: Vec::new(),
+            seccomp_strict: false,
+            fs_jail: true,
+            timeout_secs: 2,
+            mount_point: PathBuf::from("/dev/shm/burnbox-42"),
+        };
+        let environment = build_environment(&session, true);
+        for expected in [b"HOME=/sandbox".as_slice(), b"TMPDIR=/sandbox", b"PWD=/sandbox"] {
+            assert!(
+                environment.iter().any(|entry| entry.as_bytes() == expected),
+                "missing {} in jailed environment",
+                String::from_utf8_lossy(expected)
+            );
+        }
+        assert!(!environment.iter().any(|entry| entry.as_bytes() == b"HOME=/dev/shm/burnbox-42"));
     }
 
     #[test]
@@ -1216,6 +1521,8 @@ mod tests {
             target_args: Vec::new(),
             copy_in: vec![source.to_string_lossy().into_owned()],
             seccomp_strict: false,
+            fs_jail: false,
+            timeout_secs: 0,
             mount_point: workspace.clone(),
         };
         copy_in_files(&session).expect("stage copy-in file");
@@ -1254,6 +1561,8 @@ mod tests {
             target_args: Vec::new(),
             copy_in: vec![link.to_string_lossy().into_owned()],
             seccomp_strict: false,
+            fs_jail: false,
+            timeout_secs: 0,
             mount_point: workspace.clone(),
         };
         let error = copy_in_files(&session).expect_err("symlink input must be refused");
@@ -1287,6 +1596,8 @@ mod tests {
             target_args: Vec::new(),
             copy_in: vec![link_dir.join("data.txt").to_string_lossy().into_owned()],
             seccomp_strict: false,
+            fs_jail: false,
+            timeout_secs: 0,
             mount_point: workspace.clone(),
         };
         let error = copy_in_files(&session).expect_err("parent symlink must be refused");
