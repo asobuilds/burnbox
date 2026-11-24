@@ -42,12 +42,16 @@ func handleOpen(args []string) error {
 	var ram int = 512 // default
 	var copyInPaths []string // repeatable --copy-in host paths
 
-	// Parse all arguments: flags + target
+	// Parse flags and collect target argument (first non-flag positional arg)
+	var target string
+	var targetArgs []string
+
 	i := 0
 	for i < len(args) {
 		switch args[i] {
 		case "--offline", "-o":
 			offline = true
+			i++
 		case "--ram", "-r":
 			if i+1 < len(args) {
 				var err error
@@ -55,38 +59,26 @@ func handleOpen(args []string) error {
 				if err != nil {
 					return fmt.Errorf("--ram requires a valid integer: %s", args[i+1])
 				}
-				i += 2
-				continue
 			}
-			return fmt.Errorf("--ram requires a value")
+			i += 2
 		case "--copy-in":
 			if i+1 < len(args) {
 				copyInPaths = append(copyInPaths, args[i+1])
-				i += 2
-				continue
 			}
-			return fmt.Errorf("--copy-in requires a value")
+			i += 2
 		default:
-			// This is the target argument (file or URL)
-			// Don't consume it here; handle after flags
+			// This is a positional argument (target file or URL)
+			// Collect it; the first non-flag arg is the target
+			targetArgs = append(targetArgs, args[i])
 			i++
-			continue
-		}
-		i++
-	}
-
-	// The last non-flag argument is the target
-	var target string
-	for i := len(args) - 1; i >= 0; i-- {
-		if !strings.HasPrefix(args[i], "--") {
-			target = args[i]
-			break
 		}
 	}
 
-	if target == "" {
+	// The first non-flag argument is the target
+	if len(targetArgs) == 0 {
 		return fmt.Errorf("expected file-or-url argument")
 	}
+	target = targetArgs[0]
 
 	mode := "online"
 	if offline {
@@ -115,6 +107,7 @@ func handleOpen(args []string) error {
 		// Local file path: use --copy-in to stage the file into the workspace
 		if len(copyInPaths) > 0 {
 			// Pass --copy-in flags; burnbox-core will copy them into the workspace
+			// burnbox-core copies each host_path into the workspace root (basename preserved, mode 0600)
 			cmdArgs = append(cmdArgs, "--copy-in")
 			for _, cp := range copyInPaths {
 				cmdArgs = append(cmdArgs, cp)
@@ -275,9 +268,9 @@ type doctorCheckResult struct {
 // DoctorCheckFunc is a function type for running doctor checks.
 type DoctorCheckFunc func() doctorCheckResult
 
-// defaultDoctorCheckResult implements the actual host checks and returns results.
-func defaultDoctorCheckResult() doctorCheckResult {
-	var results = []doctorCheckResult{}
+// defaultDoctorCheckFunc implements the actual host checks and returns results.
+func defaultDoctorCheckFunc() doctorCheckResult {
+	results := []doctorCheckResult{}
 
 	// Check 1: AppArmor unprivileged_userns behavior
 	// On hosts with AppArmor's unprivileged_userns profile, mount(2) inside namespaces is denied,
@@ -395,17 +388,16 @@ func IsDoctorAllPassed(results []doctorCheckResult) bool {
 // --- Test hook: overrideable doctor check function variable ---
 
 // doctorCheckFunc is a package-level variable that can be overridden in tests.
-// It defaults to defaultDoctorCheckFunc.
-var doctorCheckFunc DoctorCheckFunc = defaultDoctorCheckResult
+var doctorCheckFunc func() doctorCheckResult = defaultDoctorCheckFunc
 
 // ForTestDoctorCheck returns the current doctor check function, allowing tests to
 // replace it with a mock implementation. This is exported for testing purposes.
-func ForTestDoctorCheck() DoctorCheckFunc {
+func ForTestDoctorCheck() func() doctorCheckResult {
 	return doctorCheckFunc
 }
 
 // ForTestSetDoctorCheck allows tests to set a custom doctor check function.
-func ForTestSetDoctorCheck(f DoctorCheckFunc) {
+func ForTestSetDoctorCheck(f func() doctorCheckResult) {
 	doctorCheckFunc = f
 }
 
@@ -413,10 +405,10 @@ func ForTestSetDoctorCheck(f DoctorCheckFunc) {
 // It runs host self-checks and returns an error if any critical check fails.
 func handleDoctor(args []string) error {
 	// Run the doctor checks using the (possibly overridden) check function
-	result := doctorCheckFunc()
+	checks := doctorCheckFunc()
 
-	// Check if all passed - wrap single result in slice
-	if !IsDoctorAllPassed([]doctorCheckResult{result}) {
+	// Check if all passed
+	if !IsDoctorAllPassed([]doctorCheckResult{checks}) {
 		return fmt.Errorf("some doctor checks failed")
 	}
 
@@ -433,7 +425,7 @@ func checkAppArmorBehavior() bool {
 	// Clean up
 	exec.Command("sh", "-c", "umount -f /tmp/test_shm 2>/dev/null || true; rm -rf /tmp/test_shm").Run()
 	// On this host, EACCES from tmpfs mount is expected; the important thing is
-	// whether /dev/shm is available as fallback. Check that /dev/shm exists and is a directory
+	// whether /dev/shm is available as fallback. Check that /dev/shm exists and is a directory.
 	info, err := os.Stat("/dev/shm")
 	return err == nil && info.IsDir()
 }
@@ -441,7 +433,9 @@ func checkAppArmorBehavior() bool {
 // checkCLONENETPermitted checks if CLONE_NEWNET is permitted via unshare.
 func checkCLONENETPermitted() bool {
 	cmd := exec.Command("sh", "-c", "unshare -U -n true 2>&1")
-	output, err := cmd.Output()
+	var output []byte
+	var err error
+	output, err = cmd.Output()
 	if err != nil {
 		// unshare failed - could be because NET is not permitted
 		return false

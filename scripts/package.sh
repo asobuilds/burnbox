@@ -8,6 +8,13 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 RELEASE_DIR="$PROJECT_DIR/release"
 
+# Extract version dynamically from the built binary (single source of truth)
+BURNBOX_VERSION=$("$PROJECT_DIR/bin/burnbox" --version | sed 's/BurnBox v//')
+if [ -z "$BURNBOX_VERSION" ]; then
+    echo "Error: could not determine version from bin/burnbox --version" >&2
+    exit 1
+fi
+
 # Verify required binaries exist
 if [ ! -f "$PROJECT_DIR/bin/burnbox" ]; then
     echo "Error: bin/burnbox not found. Build it first." >&2
@@ -57,10 +64,10 @@ cp "$PROJECT_DIR/bin/burnbox-core" "$PKG_BUILD_DIR/usr/local/bin/"
 # Copy desktop entry to the package structure
 cp "$PROJECT_DIR/packaging/burnbox.desktop" "$PKG_BUILD_DIR/usr/local/share/applications/"
 
-# Create DEBIAN/control
+# Create DEBIAN/control using dynamically-determined version
 cat > "$PKG_BUILD_DIR/DEBIAN/control" <<EOF
 Package: burnbox
-Version: 0.7.0
+Version: $BURNBOX_VERSION
 Section: utils
 Architecture: amd64
 Priority: optional
@@ -91,11 +98,11 @@ POSTINST_EOF
 
 chmod +x "$PKG_BUILD_DIR/DEBIAN/postinst"
 
-# Build the .deb package
-DEB_PATH="$RELEASE_DIR/burnbox_0.7.0_amd64.deb"
+# Build the .deb package using dynamic version
+DEB_PATH="$RELEASE_DIR/burnbox_${BURNBOX_VERSION}_amd64.deb"
 dpkg-deb --build "$PKG_BUILD_DIR" "$DEB_PATH"
 
 echo "Created: $DEB_PATH"
 echo "Created: $TGZ_PATH"
-echo "Packaging complete. Outputs in $RELEASE_DIR/"
+echo "Packaging complete (version $BURNBOX_VERSION). Outputs in $RELEASE_DIR/"
 echo "💡 Recommendation: Run 'burnbox doctor' to verify your host setup is suitable for sandboxing."
