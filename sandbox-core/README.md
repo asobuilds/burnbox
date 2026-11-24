@@ -71,10 +71,44 @@ exit with code `3`.
 
 The optional `--seccomp-strict` flag logs
 `Warning: strict seccomp enabled; may break complex GUI apps` to stderr and
-switches to an **allow-list** of syscalls needed by typical viewers (file I/O,
-memory, signals, scheduling, sockets, etc.). Any syscall outside that list —
-including every entry of the deny-list above — is killed, yielding exit code
-`3`. The flag does not change the two JSON stdout lines.
+switches to an **allow-list** of syscalls needed by real viewers. Any syscall
+outside that list — including every entry of the deny-list above — is killed,
+yielding exit code `3`. The flag does not change the two JSON stdout lines.
+
+The allow-list was validated against a real headless Firefox run on a tiny
+local file and PDF (Evince). Beyond ordinary file/memory/signal/socket calls,
+it includes viewer-specific entries, each added only after strace evidence:
+
+- `clone`/`clone3`/`fork`/`vfork`/`waitid` — shell launchers and GUI threads.
+- `tgkill`, `fadvise64` (arm: `arm_fadvise64_64`) — glibc thread signals and
+  locale file reads.
+- `pidfd_open`/`pidfd_send_signal` — GLib child-process monitoring.
+- `seccomp` — snap's kernel feature probe. Filters are additive, so a viewer
+  probing seccomp cannot weaken BurnBox's installed filter.
+- `getresuid`/`getresgid`, `capget` — read-only snap confinement checks.
+- `restart_syscall` — resume of a `SA_RESTART` futex wait after a signal.
+- `readahead` — ELF-loader prefetch of Firefox shared libraries.
+- `unshare` (PID only), `setsid`, `setpgid` — Firefox's own content-sandbox and
+  process detachment. `setns`, `chroot` and `pivot_root` stay killed.
+- `socketpair`, `sendmmsg`, `recvmmsg` — Firefox IPC.
+- `symlink`/`symlinkat`, `link`/`linkat`, `utimensat`, `fallocate`, `sendfile`,
+  `quotactl` — profile setup, font cache and GLib quota probes.
+- `memfd_create` — anonymous in-memory files for shared-memory IPC.
+- `getpriority`/`setpriority`, `ioprio_get`/`ioprio_set`, `sched_*` queries —
+  thread-pool and background-I/O priority management.
+
+Dangerous primitives (`ptrace`, `mount`, `umount2`, `bpf`, `seccomp` filter
+updates that would drop privileges, etc.) remain blocked. A BPF-evaluator unit
+test asserts both modes still kill `ptrace`, `mount` and a mismatched
+architecture. `tests/viewer_strict.rs` runs a strict-mode open of a tiny file
+through any available native Firefox binary; it self-skips when none is
+installed so CI is never blocked, and asserts exit `0`, exactly two JSON lines,
+and no `/dev/shm/burnbox-*` leak.
+
+Note: BurnBox requests `CLONE_NEWNET` even in `online` mode. On hosts that grant
+it, the session has only loopback networking, so loading an external `https://`
+URL stalls on DNS; this is expected network isolation, not a seccomp kill. Use a
+local `file://` document or `data:` URL to validate viewer rendering offline.
 
 ## stdout / exit contract
 

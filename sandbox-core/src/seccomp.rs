@@ -93,9 +93,15 @@ fn allowed_syscalls() -> Vec<libc::c_long> {
         libc::SYS_rt_sigaction,
         libc::SYS_rt_sigprocmask,
         libc::SYS_rt_sigreturn,
+        // Signal handlers installed with SA_RESTART resume an interrupted
+        // wait through this pseudo-syscall; without it viewer threads die on
+        // the first delivered signal.
+        libc::SYS_restart_syscall,
         libc::SYS_sigaltstack,
         libc::SYS_ioctl,
         libc::SYS_pread64,
+        // Firefox's ELF loader prefetches shared libraries with readahead.
+        libc::SYS_readahead,
         libc::SYS_pwrite64,
         libc::SYS_readv,
         libc::SYS_writev,
@@ -111,19 +117,53 @@ fn allowed_syscalls() -> Vec<libc::c_long> {
         libc::SYS_geteuid,
         libc::SYS_getgid,
         libc::SYS_getegid,
+        // Snap's setuid helpers read the full real/effective/saved ID set.
+        libc::SYS_getresuid,
+        libc::SYS_getresgid,
+        // Snap checks its confinement with a read-only capability query.
+        libc::SYS_capget,
         libc::SYS_gettid,
         libc::SYS_execve,
         libc::SYS_exit,
         libc::SYS_exit_group,
         libc::SYS_wait4,
+        // Process/thread creation is required by shell-based viewer launchers
+        // (`/usr/bin/firefox` is a script) and by browser/GUI toolkits that
+        // spawn threads. `ptrace`, `mount` and the other escape primitives stay
+        // on the denied side; CLONE_NEW* flags are not separately filtered by
+        // this classic-BPF program.
+        libc::SYS_clone,
+        libc::SYS_clone3,
+        libc::SYS_waitid,
         libc::SYS_kill,
+        // glibc uses tgkill for pthread signals and fadvise64 to hint sequential
+        // locale/library reads; both appear in real viewer startup traces.
+        libc::SYS_tgkill,
+        // Firefox's content sandbox calls unshare(CLONE_NEWPID). Namespace
+        // creation cannot restore privileges or escape the mount restrictions
+        // already enforced, so it is allowed; setns/chroot/pivot_root stay
+        // killed.
+        libc::SYS_unshare,
+        libc::SYS_setsid,
+        libc::SYS_setpgid,
+        // GLib/GIO watches child processes with pidfds; signalling through a
+        // pidfd is the corresponding teardown call.
+        libc::SYS_pidfd_open,
+        libc::SYS_pidfd_send_signal,
         libc::SYS_uname,
+        // Anonymous in-memory files back browser shared-memory IPC.
+        libc::SYS_memfd_create,
         libc::SYS_fcntl,
         libc::SYS_flock,
         libc::SYS_fsync,
         libc::SYS_fdatasync,
         libc::SYS_truncate,
         libc::SYS_ftruncate,
+        // Firefox preallocates its profile database and copies cached data
+        // with sendfile; GLib probes filesystem quotas on tmpfs.
+        libc::SYS_fallocate,
+        libc::SYS_sendfile,
+        libc::SYS_quotactl,
         libc::SYS_getdents64,
         libc::SYS_getcwd,
         libc::SYS_chdir,
@@ -139,8 +179,20 @@ fn allowed_syscalls() -> Vec<libc::c_long> {
         libc::SYS_clock_getres,
         libc::SYS_clock_nanosleep,
         libc::SYS_nanosleep,
+        libc::SYS_sched_getscheduler,
         libc::SYS_sched_getaffinity,
         libc::SYS_sched_setaffinity,
+        libc::SYS_sched_getparam,
+        libc::SYS_sched_get_priority_max,
+        libc::SYS_sched_get_priority_min,
+        libc::SYS_timerfd_create,
+        libc::SYS_timerfd_settime,
+        // Firefox's thread pool queries its scheduling priority at startup.
+        libc::SYS_getpriority,
+        libc::SYS_setpriority,
+        // Firefox's background I/O thread queries/sets its I/O priority.
+        libc::SYS_ioprio_get,
+        libc::SYS_ioprio_set,
         libc::SYS_set_tid_address,
         libc::SYS_set_robust_list,
         libc::SYS_futex,
@@ -152,6 +204,10 @@ fn allowed_syscalls() -> Vec<libc::c_long> {
         libc::SYS_inotify_init1,
         libc::SYS_inotify_add_watch,
         libc::SYS_prctl,
+        // Snap-based launchers probe seccomp(2) (SECCOMP_SET_MODE_STRICT) to
+        // fingerprint the kernel. Filters are additive and can only restrict
+        // further, so allowing this cannot weaken the BurnBox filter.
+        libc::SYS_seccomp,
         libc::SYS_rseq,
         libc::SYS_membarrier,
         libc::SYS_prlimit64,
@@ -165,9 +221,18 @@ fn allowed_syscalls() -> Vec<libc::c_long> {
         libc::SYS_readlinkat,
         libc::SYS_fchmodat,
         libc::SYS_fchownat,
+        // Firefox creates/hardlinks profile and font-cache files through the
+        // *at variants and stamps them with utimensat.
+        libc::SYS_linkat,
+        libc::SYS_symlinkat,
+        libc::SYS_utimensat,
         libc::SYS_pipe2,
         libc::SYS_accept4,
         libc::SYS_socket,
+        // Firefox IPC uses socketpair and batched datagram I/O.
+        libc::SYS_socketpair,
+        libc::SYS_sendmmsg,
+        libc::SYS_recvmmsg,
         libc::SYS_connect,
         libc::SYS_bind,
         libc::SYS_listen,
@@ -186,6 +251,8 @@ fn allowed_syscalls() -> Vec<libc::c_long> {
     // variants and `newfstatat` instead.
     #[cfg(target_arch = "x86_64")]
     allowed.extend_from_slice(&[
+        libc::SYS_fork,
+        libc::SYS_vfork,
         libc::SYS_mmap,
         libc::SYS_arch_prctl,
         libc::SYS_open,
@@ -203,6 +270,8 @@ fn allowed_syscalls() -> Vec<libc::c_long> {
         libc::SYS_rmdir,
         libc::SYS_unlink,
         libc::SYS_readlink,
+        libc::SYS_symlink,
+        libc::SYS_link,
         libc::SYS_chmod,
         libc::SYS_chown,
         libc::SYS_getrlimit,
@@ -218,6 +287,9 @@ fn allowed_syscalls() -> Vec<libc::c_long> {
     ]);
     #[cfg(target_arch = "x86")]
     allowed.extend_from_slice(&[
+        libc::SYS_fork,
+        libc::SYS_vfork,
+        libc::SYS_fadvise64_64,
         libc::SYS_mmap,
         libc::SYS_mmap2,
         libc::SYS_open,
@@ -234,6 +306,8 @@ fn allowed_syscalls() -> Vec<libc::c_long> {
         libc::SYS_rmdir,
         libc::SYS_unlink,
         libc::SYS_readlink,
+        libc::SYS_symlink,
+        libc::SYS_link,
         libc::SYS_chmod,
         libc::SYS_chown,
         libc::SYS_getrlimit,
@@ -243,6 +317,8 @@ fn allowed_syscalls() -> Vec<libc::c_long> {
     ]);
     #[cfg(target_arch = "arm")]
     allowed.extend_from_slice(&[
+        libc::SYS_fork,
+        libc::SYS_vfork,
         libc::SYS_mmap2,
         libc::SYS_open,
         libc::SYS_stat,
@@ -257,12 +333,21 @@ fn allowed_syscalls() -> Vec<libc::c_long> {
         libc::SYS_rmdir,
         libc::SYS_unlink,
         libc::SYS_readlink,
+        libc::SYS_symlink,
+        libc::SYS_link,
         libc::SYS_chmod,
         libc::SYS_chown,
         libc::SYS_setrlimit,
         libc::SYS_epoll_wait,
         libc::SYS_accept,
     ]);
+    // `fadvise64` is present on every supported arch except 32-bit arm, which
+    // exposes the same hint through the arm-specific `arm_fadvise64_64`.
+    #[cfg(not(target_arch = "arm"))]
+    allowed.push(libc::SYS_fadvise64);
+    #[cfg(target_arch = "arm")]
+    allowed.push(libc::SYS_arm_fadvise64_64);
+
     allowed
 }
 
