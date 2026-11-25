@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    name: ${{ matrix.os }} / ${{ matrix.arch }}
+    # GitHub hosts native arm64 images as <os>-arm; no cross toolchain or sudo
+    # is needed, so the whole matrix builds and tests natively.
+    runs-on: ${{ matrix.arch == 'arm64' && format('{0}-arm', matrix.os) || matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, ubuntu-24.04]
+        arch: [amd64, arm64]
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Build and test sandbox-core (Rust)
+        working-directory: sandbox-core
+        run: |
+          cargo build --release
+          cargo test
+
+      - name: Publish core binary for the orchestrator
+        run: |
+          mkdir -p bin
+          cp sandbox-core/target/release/burnbox-core bin/burnbox-core
+
+      - name: Build and test orchestrator (Go)
+        run: |
+          go build -o bin/burnbox ./cmd/burnbox
+          go test -timeout 90s ./...
+
+      - name: End-to-end acceptance
+        run: ./scripts/acceptance.sh

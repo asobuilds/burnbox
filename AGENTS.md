@@ -72,3 +72,7 @@ go test ./... && go build -o bin/burnbox ./cmd/burnbox
 2. **No silent fallbacks:** `release.sh` fails loudly on cargo/cp errors and on version drift (binary ≠ source). Never package a stale engine or a mis-versioned artifact.
 3. **Honest tests only:** a feature test must assert a real artifact (screenshot/file) or a negative (host file NOT readable); absence of a dependency ⇒ SKIP, never PASS.
 4. **Version single-source:** `internal/version/version.go` is the only version literal; scripts derive from it; ldflags must not clobber it.
+
+## v1.0.2 status (2026-11-25) — shipped
+- Agent A: AppImage guard in `fs_jail.rs`; `test_io_uring_denied_on_all_arches`; cross-test leak hygiene.
+- Agent B: `ci.yml` matrix; `dpkg` arch; `SHA256SUMS`; `list`+`kill` (SIGTERM parent, scrub-verified); config file.

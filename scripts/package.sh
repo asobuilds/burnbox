@@ -8,6 +8,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 RELEASE_DIR="$PROJECT_DIR/release"
 
+# Dynamic target architecture (fall back to amd64 on non-Debian hosts)
+ARCH=$(dpkg --print-architecture 2>/dev/null || echo "amd64")
+
 # Extract version dynamically from the built binary (single source of truth)
 BURNBOX_VERSION=$("$PROJECT_DIR/bin/burnbox" --version | sed 's/BurnBox v//')
 if [ -z "$BURNBOX_VERSION" ]; then
@@ -37,7 +40,7 @@ mkdir -p "$RELEASE_DIR"
 #   bin/burnbox-core
 #   install.sh
 #   packaging/burnbox.desktop
-TGZ_PATH="$RELEASE_DIR/burnbox_${BURNBOX_VERSION}_amd64.tar.gz"
+TGZ_PATH="$RELEASE_DIR/burnbox_${BURNBOX_VERSION}_${ARCH}.tar.gz"
 
 mkdir -p "$PROJECT_DIR/tmp_package/bin"
 mkdir -p "$PROJECT_DIR/tmp_package/packaging"
@@ -75,7 +78,7 @@ cat > "$PKG_BUILD_DIR/DEBIAN/control" <<EOF
 Package: burnbox
 Version: $BURNBOX_VERSION
 Section: utils
-Architecture: amd64
+Architecture: $ARCH
 Priority: optional
 Maintainer: BurnBox <burnbox@example.com>
 Description: Unprivileged namespace sandbox and RAM wipe engine
@@ -105,7 +108,7 @@ POSTINST_EOF
 chmod +x "$PKG_BUILD_DIR/DEBIAN/postinst"
 
 # Build the .deb package using dynamic version
-DEB_PATH="$RELEASE_DIR/burnbox_${BURNBOX_VERSION}_amd64.deb"
+DEB_PATH="$RELEASE_DIR/burnbox_${BURNBOX_VERSION}_${ARCH}.deb"
 dpkg-deb --build "$PKG_BUILD_DIR" "$DEB_PATH"
 
 echo "Created: $DEB_PATH"

@@ -94,3 +94,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Opt-in `--fs-jail` (pivot_root minimal rootfs), fresh `hidepid=2` /proc, `RLIMIT_NPROC/AS/CPU`.
 - Viewer auto-discovery `isNativeELF()` — skips the snap shim, prefers native Firefox/Chromium ELF.
 - Honest `acceptance.sh`: real screenshot artifact + host-file non-leak assertion; SKIP not fake PASS.
+
+## [1.0.2] - 2026-11-25
+### Added
+- GitHub Actions CI matrix (ubuntu-22.04/24.04 × amd64/arm64).
+- Dynamic `dpkg --print-architecture` in packaging; `release/SHA256SUMS`.
+- `burnbox list` + `burnbox kill <pid>` (SIGTERM parent → safe scrub → wiped).
+- Config file defaults (`~/.config/burnbox/config.toml`), CLI overrides config.
+- AppImage-safe `--fs-jail` fallback + arm64 `io_uring` deny-list audit.

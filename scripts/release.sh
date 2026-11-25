@@ -74,6 +74,16 @@ echo "=== Step 4: Running packaging script ==="
 echo "Packaging complete"
 echo ""
 
+# --- Step 4b: Release signing (hashes for the published artifacts) ---
+echo "=== Step 4b: Generating SHA256SUMS ==="
+(
+    cd "$RELEASE_DIR"
+    sha256sum ./*.deb ./*.tar.gz > SHA256SUMS
+)
+cat "$RELEASE_DIR/SHA256SUMS"
+echo "Generated: $RELEASE_DIR/SHA256SUMS"
+echo ""
+
 # --- Step 5: Doctor check (ADVISORY - does not fail the build) ---
 echo "=== Step 5: Running burnbox doctor (advisory) ==="
 DOCTOR_EXIT=0

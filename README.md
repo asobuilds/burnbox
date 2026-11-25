@@ -78,3 +78,6 @@ Fixes to v1.0.0 found by a clean-room audit (build-from-source gate, not dev-mac
 - **M1–M10** shipped · **M11 / M11.1** shipped (auto-discovery, honest acceptance, fs-jail/proc/rlimits/timeout+scrub, version single-source)
 - **v1.0.1** tagged & released
 - **M12** next — CI matrix, AppImage, GPG signing + SHA256SUMS, config file, Wayland/Xephyr live GUI smoke test, `burnbox list/kill`
+
+## v1.0.2 — scale & trust (2026-11-25)
+CI matrix (22.04/24.04 × amd64/arm64) · dynamic-arch packaging · `SHA256SUMS` · `burnbox list`/`kill` · config file defaults · AppImage-safe jail · arm64 io_uring audit.

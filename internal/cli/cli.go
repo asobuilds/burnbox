@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"burnbox/internal/config"
 )
 
 // statusLine represents the JSON status output from burnbox-core.
@@ -31,6 +33,10 @@ func Execute() error {
 		return handleOpen(os.Args[2:])
 	case "doctor":
 		return handleDoctor(os.Args[2:])
+	case "list", "ls":
+		return handleList(os.Args[2:])
+	case "kill":
+		return handleKill(os.Args[2:])
 	default:
 		return fmt.Errorf("unknown subcommand %q", os.Args[1])
 	}
@@ -39,8 +45,10 @@ func Execute() error {
 // handleOpen processes the 'open' subcommand.
 // Usage: burnbox open <file-or-url> [--offline] [--ram <mb>] [--copy-in <host_path> ...]
 func handleOpen(args []string) error {
-	var offline bool
-	var ram int = 512         // default
+	// Config file supplies defaults; explicit CLI flags below override them.
+	cfg := config.Load()
+	mode := cfg.Mode
+	ram := cfg.RamMB
 	var copyInPaths []string  // repeatable --copy-in host paths
 	var screenshotPath string // optional --screenshot output path
 
@@ -52,7 +60,11 @@ func handleOpen(args []string) error {
 	for i < len(args) {
 		switch args[i] {
 		case "--offline", "-o":
-			offline = true
+			mode = "offline"
+			i++
+		case "--online":
+			// Explicit counterpart for a config that defaults to offline.
+			mode = "online"
 			i++
 		case "--ram", "-r":
 			if i+1 < len(args) {
@@ -86,11 +98,6 @@ func handleOpen(args []string) error {
 		return fmt.Errorf("expected file-or-url argument")
 	}
 	target = targetArgs[0]
-
-	mode := "online"
-	if offline {
-		mode = "offline"
-	}
 
 	// Build burnbox-core command arguments per Amendment v1.1:
 	// --target must be an executable path. Viewers/URLs are passed as args after --.
