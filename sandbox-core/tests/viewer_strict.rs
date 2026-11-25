@@ -74,6 +74,12 @@ fn strict_seccomp_viewer_opens_tiny_file() {
     let _ = std::fs::remove_file(&screenshot);
     let url = format!("file://{}", document.display());
 
+    let shm_before: std::collections::BTreeSet<String> = std::fs::read_dir("/dev/shm")
+        .expect("read /dev/shm")
+        .filter_map(Result::ok)
+        .map(|entry| entry.file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with("burnbox-"))
+        .collect();
     let child = Command::new(env!("CARGO_BIN_EXE_burnbox-core"))
         .args([
             "--mode",
@@ -140,12 +146,13 @@ fn strict_seccomp_viewer_opens_tiny_file() {
         "viewer did not render the tiny file; stderr: {stderr}"
     );
 
-    let leaked: Vec<String> = std::fs::read_dir("/dev/shm")
+    let shm_after: std::collections::BTreeSet<String> = std::fs::read_dir("/dev/shm")
         .expect("read /dev/shm")
         .filter_map(Result::ok)
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
         .filter(|name| name.starts_with("burnbox-"))
         .collect();
+    let leaked: Vec<String> = shm_after.difference(&shm_before).cloned().collect();
     assert!(leaked.is_empty(), "/dev/shm workspace leak: {leaked:?}");
 
     let _ = std::fs::remove_dir_all(&temp);

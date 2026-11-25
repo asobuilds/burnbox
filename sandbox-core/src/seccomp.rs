@@ -646,6 +646,42 @@ mod tests {
 
     /// The diagnostic action must expose unlisted syscalls through strace
     /// (ENOSYS) while leaving the production KILL action untouched.
+    /// The io_uring numbers are identical (425/426/427) on the aarch64 and
+    /// x86_64 Linux ABIs shipped by libc. The host-only cfg assertions below
+    /// fail loudly if a future libc release changes either ABI; membership in
+    /// `denied_syscalls()` is asserted on every architecture.
+    #[test]
+    fn test_io_uring_denied_on_all_arches() {
+        let blocked = denied_syscalls();
+        for (name, syscall) in [
+            ("io_uring_setup", libc::SYS_io_uring_setup),
+            ("io_uring_enter", libc::SYS_io_uring_enter),
+            ("io_uring_register", libc::SYS_io_uring_register),
+        ] {
+            assert!(blocked.contains(&syscall), "missing blocked {name}");
+            for strict in [false, true] {
+                assert_eq!(
+                    evaluate(&build_filter(strict), syscall, AUDIT_ARCH),
+                    SECCOMP_RET_KILL_PROCESS,
+                    "{name} must be killed in both default and strict modes"
+                );
+            }
+        }
+
+        #[cfg(target_arch = "aarch64")]
+        {
+            assert_eq!(libc::SYS_io_uring_setup, 425);
+            assert_eq!(libc::SYS_io_uring_enter, 426);
+            assert_eq!(libc::SYS_io_uring_register, 427);
+        }
+        #[cfg(target_arch = "x86_64")]
+        {
+            assert_eq!(libc::SYS_io_uring_setup, 425);
+            assert_eq!(libc::SYS_io_uring_enter, 426);
+            assert_eq!(libc::SYS_io_uring_register, 427);
+        }
+    }
+
     #[test]
     fn diagnostic_action_replaces_kill_with_enosys() {
         for strict in [false, true] {

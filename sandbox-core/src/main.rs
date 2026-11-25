@@ -28,7 +28,9 @@
 //! rlimits (`RLIMIT_NPROC`, `RLIMIT_AS`, plus `RLIMIT_CPU` when `--timeout` is
 //! set). The parent enforces the wall-clock deadline by killing the supervisor,
 //! then runs the same zeroize+rmdir scrub and `wiped` emission as every other
-//! exit path. None of these change the two-line JSON/exit-code contract.
+//! exit path. `--fs-jail` also detects AppImage `/tmp/.mount_*` payloads and
+//! falls back to the overlay with a warning. None of these change the two-line
+//! JSON/exit-code contract.
 
 mod fs_jail;
 mod network;
@@ -989,16 +991,27 @@ fn run_sandbox(session: &Session) -> i32 {
         return EXIT_RUNTIME;
     }
 
-    // Optional filesystem jail. A host LSM that denies mount/pivot_root only
-    // produces a warning: the session continues with the overlay behavior.
+    // Optional filesystem jail. A host LSM that denies mount/pivot_root, or an
+    // AppImage runtime whose payload lives under /tmp/.mount_*, only produces a
+    // warning: the session continues with the overlay behavior.
     let jail = if session.fs_jail {
-        if !ram_mounted {
+        if let Some(mount) = fs_jail::appimage_mount_point(Path::new(&session.target)) {
+            eprintln!(
+                "burnbox-core: warning: AppImage mount {} is outside the static /usr /lib bind list; --fs-jail falling back to overlay behavior",
+                mount.display()
+            );
+            None
+        } else if !ram_mounted {
             eprintln!(
                 "burnbox-core: warning: --fs-jail requires a private RAM mount; host policy denied it, falling back to overlay behavior"
             );
             None
         } else {
-            match fs_jail::Jail::setup(&session.mount_point, session.ram_mb) {
+            match fs_jail::Jail::setup(
+                &session.mount_point,
+                session.ram_mb,
+                Path::new(&session.target),
+            ) {
                 Ok(jail) => {
                     eprintln!(
                         "burnbox-core: fs-jail active (pivot_root; ro /usr /lib /lib64 /bin; fresh /dev /tmp /proc; workspace at {})",

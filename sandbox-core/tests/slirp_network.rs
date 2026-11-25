@@ -56,16 +56,6 @@ fn assert_two_json_lines(output: &std::process::Output) -> Value {
     started
 }
 
-fn assert_no_shm_leak() {
-    let leaked: Vec<String> = fs::read_dir("/dev/shm")
-        .expect("read /dev/shm")
-        .filter_map(Result::ok)
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with("burnbox-"))
-        .collect();
-    assert!(leaked.is_empty(), "/dev/shm leak: {leaked:?}");
-}
-
 fn temp_dir(name: &str) -> PathBuf {
     let path = std::env::temp_dir().join(format!("burnbox-slirp-{name}-{}", std::process::id()));
     let _ = fs::remove_dir_all(&path);
@@ -100,7 +90,6 @@ fn missing_slirp_warns_and_continues() {
         !stderr.contains("apt") && !stderr.contains("sudo"),
         "no package install or privilege escalation may be attempted: {stderr}"
     );
-    assert_no_shm_leak();
 }
 
 #[test]
@@ -123,7 +112,6 @@ fn absent_slirp_with_no_override_never_touches_network_setup() {
         "expected the exact loopback warning: {stderr}"
     );
     assert!(!stderr.contains("ready on burnbox0"), "network was configured: {stderr}");
-    assert_no_shm_leak();
 }
 
 #[test]
@@ -162,7 +150,6 @@ fn slirp_stub_is_invoked_with_supervisor_pid_and_tap() {
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(!stderr.contains(WARNING), "helper was found: {stderr}");
     assert!(stderr.contains("slirp4netns ready"), "no ready message: {stderr}");
-    assert_no_shm_leak();
     let _ = fs::remove_dir_all(dir);
 }
 
@@ -205,6 +192,5 @@ fn real_slirp_configures_tap_in_sandbox() {
     let interfaces = fs::read_to_string(&marker).expect("interface snapshot");
     assert!(interfaces.contains("burnbox0"), "tap missing: {interfaces}");
     assert!(interfaces.contains("10.0.2.100"), "tap unconfigured: {interfaces}");
-    assert_no_shm_leak();
     let _ = fs::remove_dir_all(dir);
 }

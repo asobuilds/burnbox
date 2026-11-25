@@ -39,6 +39,35 @@ pub const JAIL_DIRS: &[&str] = &[
 /// Host directories exposed read-only for the dynamic loader and binaries.
 pub const BIND_SOURCES: &[&str] = &["/usr", "/lib", "/lib64", "/bin"];
 
+/// Detect the `AppImage` runtime mount prefix (for example `/tmp/.mount_AB12cd`)
+/// in an arbitrary path. `AppImage` extracts its payload there and may place
+/// viewers and their libraries under it, so a jail built only from host
+/// `/usr`/`/lib` would hide the executable the target actually needs.
+pub fn appimage_mount_from_path(path: &Path) -> Option<PathBuf> {
+    path.ancestors().find_map(|ancestor| {
+        let name = ancestor.file_name()?.to_str()?;
+        name.starts_with(".mount_")
+            .then(|| ancestor.to_path_buf())
+    })
+}
+
+/// Detect an AppImage runtime from the requested target, `APPDIR` or the path
+/// of this executable. Used to keep `--fs-jail` from breaking abstracted host
+/// filesystem layouts.
+pub fn appimage_mount_point(target: &Path) -> Option<PathBuf> {
+    if let Some(mount) = appimage_mount_from_path(target) {
+        return Some(mount);
+    }
+    if let Some(appdir) = std::env::var_os("APPDIR")
+        && let Some(mount) = appimage_mount_from_path(Path::new(&appdir))
+    {
+        return Some(mount);
+    }
+    std::env::current_exe()
+        .ok()
+        .and_then(|exe| appimage_mount_from_path(&exe))
+}
+
 /// Host-side path of the jail's tmpfs root for a given supervisor PID.
 pub fn root_path_for(pid: i32) -> PathBuf {
     Path::new("/dev/shm").join(format!("burnbox-jail-{pid}"))
@@ -101,7 +130,18 @@ impl Jail {
 
     /// Build the jail and pivot into it. On any failure the partial mounts are
     /// detached and the caller falls back to the overlay behavior.
-    pub fn setup(workspace: &Path, ram_mb: u64) -> Result<Jail, String> {
+    pub fn setup(workspace: &Path, ram_mb: u64, target: &Path) -> Result<Jail, String> {
+        // AppImage payloads live under /tmp/.mount_* and are not covered by the
+        // static /usr /lib /lib64 /bin bind list. Refuse the jail so the caller
+        // can fall back to the overlay with a warning instead of hiding the
+        // viewer's own libraries.
+        if let Some(mount) = appimage_mount_point(target) {
+            return Err(format!(
+                "AppImage mount {} needs the overlay filesystem view",
+                mount.display()
+            ));
+        }
+
         let root = root_path();
         let _ = fs::remove_dir_all(&root);
         for dir in JAIL_DIRS {
@@ -252,6 +292,33 @@ mod tests {
         assert_eq!(PROC_OPTIONS, "hidepid=2,gid=0");
         assert!(JAIL_DIRS.contains(&"proc"));
         assert!(JAIL_DIRS.contains(&"sandbox"));
+    }
+
+    #[test]
+    fn appimage_mount_is_detected_from_target_paths() {
+        let mount = Path::new("/tmp/.mount_AB12cd");
+        let viewer = mount.join("usr/bin/firefox");
+        assert_eq!(appimage_mount_from_path(&viewer), Some(mount.to_path_buf()));
+        assert_eq!(
+            appimage_mount_from_path(mount),
+            Some(mount.to_path_buf())
+        );
+        assert_eq!(appimage_mount_from_path(Path::new("/usr/bin/firefox")), None);
+        // A directory merely named `mount_*` is not an AppImage runtime.
+        assert_eq!(
+            appimage_mount_from_path(Path::new("/tmp/mount_AB12cd/usr/bin/firefox")),
+            None
+        );
+    }
+
+    #[test]
+    fn appimage_payload_is_not_in_the_static_bind_list() {
+        assert!(
+            BIND_SOURCES
+                .iter()
+                .all(|source| !source.starts_with("/tmp/.mount_")),
+            "static bind list must not pretend to cover AppImage payload paths"
+        );
     }
 
     #[test]

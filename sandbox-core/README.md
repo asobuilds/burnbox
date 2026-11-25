@@ -118,7 +118,13 @@ Some hosts (notably Ubuntu with AppArmor's `unprivileged_userns` profile) deny
 `mount(2)`/`pivot_root` inside user namespaces. In that case BurnBox prints a
 warning such as `--fs-jail could not pivot_root ... falling back to overlay
 behavior` and continues with the existing overlay path; the flag never turns a
-host policy denial into a hard session failure. `tests/fs_jail_timeout.rs`
+host policy denial into a hard session failure.
+
+When the core or the requested target lives inside an AppImage payload
+(`/tmp/.mount_*`), the static `/usr`/`/lib` bind list would hide the viewer's
+own libraries. `--fs-jail` detects that layout from the target path, `APPDIR`
+or the current executable and falls back with a warning instead of breaking the
+AppImage. `tests/fs_jail_timeout.rs`
 asserts both branches: a real jail must hide `/etc/hostname`, while a fallback
 must stay viewer-compatible and still expose staged files.
 
