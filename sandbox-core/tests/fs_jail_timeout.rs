@@ -110,7 +110,7 @@ fn timeout_kills_sleeping_target_and_scrubs() {
     let started = assert_contract_stdout(&output.stdout);
     assert_ne!(output.status.code(), Some(0), "timeout must be non-zero");
     assert!(
-        stderr.contains("timeout 1s elapsed; SIGKILL target"),
+        stderr.contains("timeout 1s elapsed"),
         "missing timeout diagnostic: {stderr}"
     );
     assert!(

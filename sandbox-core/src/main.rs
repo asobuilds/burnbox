@@ -26,8 +26,9 @@
 //! `pivot_root`, falling back with a warning when the host LSM denies mounts),
 //! a fresh `hidepid=2,gid=0` procfs for the new PID namespace, and pre-exec
 //! rlimits (`RLIMIT_NPROC`, `RLIMIT_AS`, plus `RLIMIT_CPU` when `--timeout` is
-//! set). The supervisor enforces the wall-clock deadline with `SIGKILL` before
-//! the usual scrub. None of these change the two-line JSON/exit-code contract.
+//! set). The parent enforces the wall-clock deadline by killing the supervisor,
+//! then runs the same zeroize+rmdir scrub and `wiped` emission as every other
+//! exit path. None of these change the two-line JSON/exit-code contract.
 
 mod fs_jail;
 mod network;
@@ -265,6 +266,29 @@ fn emergency_cleanup(session: &Session, child_pid: Pid) {
     if let Err(error) = zeroize_and_remove_workspace(&session.mount_point) {
         eprintln!("burnbox-core: interrupted cleanup failed: {error}");
     }
+}
+
+/// Timeout teardown in the parent. Killing the supervisor (PID 1 in the new
+/// PID namespace) also reaps the target and any grandchildren. The parent must
+/// then stop the userspace network stack, run the same zeroize+rmdir scrub as
+/// the normal and signal paths, and emit `wiped` before exiting non-zero —
+/// otherwise a timed-out session leaks its RAM workspace and breaks the
+/// two-line JSON contract.
+fn timeout_cleanup(session: &Session, child_pid: Pid, slirp: &mut Option<network::Slirp>) {
+    let _ = kill(child_pid, Signal::SIGKILL);
+    for _ in 0..50 {
+        match waitpid(child_pid, Some(WaitPidFlag::WNOHANG)) {
+            Ok(WaitStatus::StillAlive) => std::thread::sleep(Duration::from_millis(10)),
+            Ok(_) | Err(Errno::ECHILD) => break,
+            Err(Errno::EINTR) => continue,
+            Err(_) => break,
+        }
+    }
+    stop_network(slirp);
+    if let Err(error) = zeroize_and_remove_workspace(&session.mount_point) {
+        eprintln!("burnbox-core: timeout cleanup failed: {error}");
+    }
+    emit_status("wiped", child_pid, &session.mount_point);
 }
 
 /// Open a `--copy-in` source without ever following a symlink component.
@@ -730,6 +754,13 @@ fn main() {
     drop(sync_write);
     drop(sync_read);
 
+    // Parent-owned wall-clock deadline. The supervisor is PID 1 in its PID
+    // namespace, so SIGKILLing it terminates the whole session tree. The
+    // timeout path must scrub and emit `wiped` here rather than relying on the
+    // supervisor's exit, which may never arrive.
+    let deadline = (session.timeout_secs > 0)
+        .then(|| Instant::now() + Duration::from_secs(session.timeout_secs));
+
     // Poll the self-pipe while waiting: a caught signal wakes poll immediately
     // and the scrub happens here, outside the async signal handler.
     let mut poll_fds = [PollFd::new(interrupt_read.as_fd(), PollFlags::POLLIN)];
@@ -739,6 +770,14 @@ fn main() {
             stop_network(&mut slirp);
             emergency_cleanup(&session, child_pid);
             emit_status("wiped", child_pid, &session.mount_point);
+            process::exit(EXIT_RUNTIME);
+        }
+        if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+            eprintln!(
+                "burnbox-core: timeout {}s elapsed; killing supervisor and scrubbing",
+                session.timeout_secs
+            );
+            timeout_cleanup(&session, child_pid, &mut slirp);
             process::exit(EXIT_RUNTIME);
         }
         match waitpid(child_pid, Some(WaitPidFlag::WNOHANG)) {
@@ -994,28 +1033,11 @@ fn run_sandbox(session: &Session) -> i32 {
     };
 
     // This supervisor is PID 1 in the new PID namespace: reap every child,
-    // but stop waiting once the requested target has been reaped. Poll so a
-    // wall-clock timeout can SIGKILL the target even when it sleeps or spins.
-    let deadline = (session.timeout_secs > 0)
-        .then(|| Instant::now() + Duration::from_secs(session.timeout_secs));
-    let mut timed_out = false;
+    // but stop waiting once the requested target has been reaped. The parent
+    // owns the wall-clock timeout so it can always run the final scrub.
     let mut target_status: Option<WaitStatus> = None;
     while target_status.is_none() {
-        match waitpid(Pid::from_raw(-1), Some(WaitPidFlag::WNOHANG)) {
-            Ok(WaitStatus::StillAlive) => {
-                if let Some(deadline) = deadline
-                    && Instant::now() >= deadline
-                    && !timed_out
-                {
-                    eprintln!(
-                        "burnbox-core: timeout {}s elapsed; SIGKILL target",
-                        session.timeout_secs
-                    );
-                    let _ = kill(target_pid, Signal::SIGKILL);
-                    timed_out = true;
-                }
-                std::thread::sleep(Duration::from_millis(50));
-            }
+        match waitpid(Pid::from_raw(-1), None) {
             Ok(status) => {
                 if status.pid() == Some(target_pid) {
                     target_status = Some(status);
@@ -1047,11 +1069,7 @@ fn run_sandbox(session: &Session) -> i32 {
         jail.finish();
     }
 
-    if timed_out {
-        EXIT_RUNTIME
-    } else {
-        session_exit_code(target_status)
-    }
+    session_exit_code(target_status)
 }
 
 /// Map the target's terminal status to the AGREEMENT.md exit contract.

@@ -129,9 +129,11 @@ fall back to a plain fresh procfs; LSM denials only warn.
 Immediately before `execve` the target receives `RLIMIT_NPROC` and `RLIMIT_AS`
 (derived from `--ram-mb` with a generous floor so Firefox's nested sandbox
 still works). `--timeout <secs>` defaults to `0` (disabled); when set it also
-installs `RLIMIT_CPU` and the supervisor sends `SIGKILL` after the wall-clock
-deadline. A timed-out session exits `1` after the normal zeroize scrub, and
-stdout remains exactly the two contract JSON lines.
+installs `RLIMIT_CPU` and the **parent** sends `SIGKILL` to the supervisor after
+the wall-clock deadline. Killing the PID-namespace init terminates the whole
+session tree; the parent then stops slirp, runs the same zeroize+rmdir scrub as
+the normal and signal paths, emits `wiped`, and exits `1`. Stdout stays exactly
+the two contract JSON lines. `tests/timeout_scrub.rs` is the regression test.
 
 ## Seccomp-BPF
 
