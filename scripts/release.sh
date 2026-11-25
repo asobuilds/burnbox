@@ -11,7 +11,11 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 RELEASE_DIR="$PROJECT_DIR/release"
 
 # Extract version dynamically from source (single source of truth: internal/version/version.go)
-BURNBOX_VERSION="1.0.0"
+BURNBOX_VERSION=$(grep -oP 'Version\s*=\s*"\K[^"]+' "$PROJECT_DIR/internal/version/version.go")
+if [ -z "$BURNBOX_VERSION" ]; then
+    echo "FATAL: could not read version from internal/version/version.go" >&2
+    exit 1
+fi
 
 echo "========================================="
 echo "BurnBox Release Pipeline v${BURNBOX_VERSION}"
@@ -44,10 +48,18 @@ fi
 echo "burnbox-core built, copied to bin/, and verified fresh (--fs-jail + --timeout present)"
 echo ""
 
-# --- Step 2: Go build with version ---
+# --- Step 2: Go build (version comes from internal/version/version.go) ---
 echo "=== Step 2: Building burnbox (Go) ==="
-go build -ldflags "-X burnbox/internal/version.Version=${BURNBOX_VERSION}" -o "$PROJECT_DIR/bin/burnbox" ./cmd/burnbox
-echo "burnbox built with version ${BURNBOX_VERSION}"
+go build -o "$PROJECT_DIR/bin/burnbox" ./cmd/burnbox
+
+# Assert the built binary reports exactly the source version (version-drift kill-switch).
+BUILT_VERSION=$("$PROJECT_DIR/bin/burnbox" --version 2>&1 | sed 's/^BurnBox v//')
+if [ "$BUILT_VERSION" != "$BURNBOX_VERSION" ]; then
+    echo "FATAL: binary version != source version; refusing to package" >&2
+    echo "       binary=${BUILT_VERSION} source=${BURNBOX_VERSION}" >&2
+    exit 1
+fi
+echo "burnbox built with version ${BURNBOX_VERSION} (matches source)"
 echo ""
 
 # --- Step 3: Go tests ---
