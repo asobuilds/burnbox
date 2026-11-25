@@ -62,3 +62,13 @@ go test ./... && go build -o bin/burnbox ./cmd/burnbox
 ## Milestone 9 status (2026-11-24) — shipped
 - Agent A: sandbox-core symlink-escape hardening (O_NOFOLLOW), integration test added.
 - Agent B: internal/version 1.0.0, doctor slirp check, CHANGELOG.md, release.sh manual tag output.
+
+## v1.0.1 status (2026-11-25) — shipped
+- Agent A (Rust, sandbox-core/** only): io_uring denied (88aa567); fs-jail + fresh /proc + rlimits + timeout (c609a37); timeout scrub moved to parent, emits wiped (4b3cb90). Stayed in scope; left B's files untouched.
+- Agent B (Go, cmd/internal/scripts/packaging only): tarball ships core + versioned name + http/https MIME + resolveCorePath + root-safe deb; auto-discovery isNativeELF; honest acceptance; release/ auto-clean; removed stale-core fallback; version from source + drift kill-switch. Stayed in scope.
+
+## New engineering invariants (enforced by kill-switches, added after v1.0.0 audit)
+1. **Scrub invariant:** every exit path (normal, signal, timeout) MUST call `zeroize_and_remove_workspace()` and emit the `wiped` JSON line. Any new exit route needs a `/dev/shm` leak assertion.
+2. **No silent fallbacks:** `release.sh` fails loudly on cargo/cp errors and on version drift (binary ≠ source). Never package a stale engine or a mis-versioned artifact.
+3. **Honest tests only:** a feature test must assert a real artifact (screenshot/file) or a negative (host file NOT readable); absence of a dependency ⇒ SKIP, never PASS.
+4. **Version single-source:** `internal/version/version.go` is the only version literal; scripts derive from it; ldflags must not clobber it.

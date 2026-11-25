@@ -79,3 +79,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - `scripts/package.sh` creating .tar.gz and .deb outputs
 - Go test `TestDesktopFileValidation` validating desktop file content
 - `cmd/burnbox/main.go` friendly usage banner with install tip
+
+## [1.0.1] - 2026-11-25
+### Fixed
+- Portable `.tar.gz` now includes `bin/burnbox-core` (was omitted; tarballs were non-functional).
+- `release/` wiped before each build; artifacts version-named (no stale 0.5.0–0.8.0).
+- `.desktop` + `install.sh` register `x-scheme-handler/http|https`; removed invalid `application/x-html`.
+- `burnbox` resolves `burnbox-core` via PATH → `~/.local/bin` → `./bin` (works from desktop launch).
+- `.deb` postinst no longer references `$HOME` (runs as root) — system-wide desktop/MIME registration.
+- `--timeout` now scrubs the RAM workspace and emits the `wiped` JSON line (was leaking /dev/shm).
+- `release.sh` reads version from `internal/version/version.go`; no ldflags clobber; version-drift kill-switch.
+### Added
+- `io_uring_setup/enter/register` denied in default seccomp policy.
+- Opt-in `--fs-jail` (pivot_root minimal rootfs), fresh `hidepid=2` /proc, `RLIMIT_NPROC/AS/CPU`.
+- Viewer auto-discovery `isNativeELF()` — skips the snap shim, prefers native Firefox/Chromium ELF.
+- Honest `acceptance.sh`: real screenshot artifact + host-file non-leak assertion; SKIP not fake PASS.

@@ -54,3 +54,14 @@
   longer abort the pipeline). Version single-source internal/version=0.8.0.
 - 2026-11-24 (M9): --copy-in symlink-escape hardened (O_NOFOLLOW/lstat prevents host-file exfiltration). 
   burnbox doctor now explicitly checks slirp4netns readiness. Version single-source bumped to 1.0.0.
+- 2026-11-25 (M11.1 audit): clean-room gate caught 2 v1.0.0 regressions the dev-machine tests missed.
+  (a) --timeout path leaked /dev/shm (SIGKILL without scrub) -> moved deadline to parent, reuses
+      zeroize_and_remove_workspace + emits wiped (rust 4b3cb90). (b) release.sh hardcoded 1.0.0 and
+      ldflags-clobbered the source -> tag v1.0.1 shipped a 1.0.0 binary -> now greps version.go,
+      removed ldflags, added drift kill-switch (simulate 9.9.9 -> FATAL exit 1).
+- 2026-11-25 (M11 honest tests): acceptance Test-3 previously faked PASS while snap-confine stderr
+  proved the browser never launched. Now requires a non-empty --screenshot artifact + a host-file
+  non-leak assertion; SKIPs (not PASSes) when slirp4netns/native viewer absent. Auto-discovery
+  isNativeELF() skips the #! snap shim.
+- 2026-11-25 (M11 fs-jail): opt-in pivot_root jail; on this Ubuntu host AppArmor denies pivot_root ->
+  overlay fallback (SKIP in gate, by design). Jail proven by tests conditional on mount support.

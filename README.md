@@ -58,3 +58,23 @@ burnbox open <url> [--offline] [--ram <mb>]
 burnbox doctor
 burnbox --version
 ```
+
+## v1.0.1 — hotfix release (2026-11-25)
+Fixes to v1.0.0 found by a clean-room audit (build-from-source gate, not dev-machine assumptions):
+- **Packaging:** the portable `.tar.gz` now ships `bin/burnbox-core` (it was missing → tarballs were non-functional); artifacts are version-named (`burnbox_1.0.1_amd64.{deb,tar.gz}`) and `release/` is wiped before each build (no stale versions).
+- **Desktop:** `x-scheme-handler/http` + `https` added (right-click a *link* → Open With → BurnBox now actually works); invalid `application/x-html` removed.
+- **Core path:** `burnbox` locates `burnbox-core` via PATH → `~/.local/bin` → `./bin` (3-tier), so it works when launched from the desktop/`.desktop`, not only from the repo dir.
+- **`.deb`:** `postinst` no longer writes `$HOME` (it runs as root) — desktop/MIME now register system-wide correctly.
+- **Security:** `io_uring_*` denied in the default seccomp policy (async-I/O syscall-visibility bypass); opt-in `--fs-jail` (pivot_root minimal rootfs), fresh `hidepid=2` `/proc`, `RLIMIT_NPROC/AS/CPU`, and `--timeout` (now scrubs the workspace on kill).
+- **Viewer auto-discovery:** `findViewer()` skips the broken snap shim (`/usr/bin/firefox`) and prefers a native Firefox/Chromium ELF.
+- **Honest tests:** `acceptance.sh` requires a real screenshot artifact and a host-file non-leak assertion; it **SKIPs** (never fakes PASS) when slirp4netns/native viewer are absent.
+- **Version single-source:** `release.sh` reads the version from `internal/version/version.go` (no `-ldflags` clobber) and **fails the pipeline** if binary ≠ source (drift kill-switch).
+
+### Known limitations (honest)
+- **Live URL fetching** still requires `slirp4netns` on PATH (or `BURNBOX_SLIRP4NETNS`); otherwise online mode is loopback-only with a warning. One-time host setup: `sudo apt-get install -y slirp4netns`.
+- **`--fs-jail`** is opt-in and, on AppArmor-confined hosts (Ubuntu), `pivot_root` is denied → graceful overlay fallback. The jail is proven by tests conditional on mount support; verify on a host that allows unprivileged `pivot_root` (e.g. Fedora/Arch, or Ubuntu with `unprivileged_userns_clone` + permissive profile).
+
+### Milestone status (single source of truth)
+- **M1–M10** shipped · **M11 / M11.1** shipped (auto-discovery, honest acceptance, fs-jail/proc/rlimits/timeout+scrub, version single-source)
+- **v1.0.1** tagged & released
+- **M12** next — CI matrix, AppImage, GPG signing + SHA256SUMS, config file, Wayland/Xephyr live GUI smoke test, `burnbox list/kill`
