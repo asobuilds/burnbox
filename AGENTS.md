@@ -76,3 +76,4 @@ go test ./... && go build -o bin/burnbox ./cmd/burnbox
 ## v1.0.2 status (2026-11-25) — shipped
 - Agent A: AppImage guard in `fs_jail.rs`; `test_io_uring_denied_on_all_arches`; cross-test leak hygiene.
 - Agent B: `ci.yml` matrix; `dpkg` arch; `SHA256SUMS`; `list`+`kill` (SIGTERM parent, scrub-verified); config file.
+- Documentation synced to v1.0.2: README rewritten in research-problem format; CHANGELOG/RESOLUTION appended. `./scripts/release.sh` verified green end to end (Rust → Go → go test → package → SHA256SUMS → advisory doctor). Scrub, no-silent-fallback, honest-test and version-single-source invariants unchanged.

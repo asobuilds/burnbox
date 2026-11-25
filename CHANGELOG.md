@@ -97,8 +97,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [1.0.2] - 2026-11-25
 ### Added
-- GitHub Actions CI matrix (ubuntu-22.04/24.04 × amd64/arm64).
-- Dynamic `dpkg --print-architecture` in packaging; `release/SHA256SUMS`.
-- `burnbox list` + `burnbox kill <pid>` (SIGTERM parent → safe scrub → wiped).
-- Config file defaults (`~/.config/burnbox/config.toml`), CLI overrides config.
-- AppImage-safe `--fs-jail` fallback + arm64 `io_uring` deny-list audit.
+- GitHub Actions CI matrix (ubuntu-22.04/24.04 × amd64/arm64) using native arm64 runners.
+- Dynamic `dpkg --print-architecture` in packaging; `release/SHA256SUMS` for published `.deb`/`.tar.gz`.
+- `burnbox list` / `burnbox ls` (active vs stale RAM workspaces) and `burnbox kill <pid|burnbox-pid|path>` (SIGTERM to parent → safe scrub → wiped).
+- Config file defaults via `$BURNBOX_CONFIG`, `~/.config/burnbox/config.toml` or `config.json` (`mode`, `ram_mb`); CLI flags override them.
+- AppImage-safe `--fs-jail` fallback for `/tmp/.mount_*` payloads; `test_io_uring_denied_on_all_arches` audit for x86_64/aarch64.
+
+### Changed
+- `burnbox open` now streams `burnbox-core` stdout through to the terminal, preserving the two contract JSON lines for the user; summaries are parsed from that same stream (no second core invocation).
+- Release pipeline verifies freshly built core flags (`--fs-jail`, `--timeout`), checks binary-versus-source version drift, and keeps `burnbox doctor` advisory for headless CI.
+- Shared-`/dev/shm` leak assertions in Rust integration tests compare against a baseline so concurrent agents' live sessions do not cause false failures, without weakening each session's own mount-point assertion.
+- Documentation rewritten in the Nigerian Research Problem Approach: abstract, background, problem, objectives, methodology, complexities, significance, implementation, scope/limitations and M13–M17 roadmap.
+
+### Fixed
+- `burnbox kill` refuses PIDs without a live workspace and reports stale ones for manual cleanup instead of signalling an unrelated process; teardown remains the core's signal-safe zeroize+rmdir path.
+- Timeout teardown remains parent-owned: SIGKILL supervisor, bounded reap, stop network, scrub, emit `wiped`, exit `1` (`sandbox-core/tests/timeout_scrub.rs`).
+- Defaults from a missing/malformed config no longer break a run; invalid `mode`/`ram_mb` values are normalised.

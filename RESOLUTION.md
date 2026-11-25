@@ -65,3 +65,27 @@
   isNativeELF() skips the #! snap shim.
 - 2026-11-25 (M11 fs-jail): opt-in pivot_root jail; on this Ubuntu host AppArmor denies pivot_root ->
   overlay fallback (SKIP in gate, by design). Jail proven by tests conditional on mount support.
+
+### 2026-11-25 (v1.0.2 — scale and trust) — resolved
+- **Cross-architecture CI:** `ci.yml` builds/tests Rust+Go natively on ubuntu-22.04/24.04 × amd64/arm64
+  (arm64 via `-arm` hosted runners). No privileged cross-toolchain or sudo was introduced.
+- **Artifact trust:** packaging now derives `Architecture` from `dpkg --print-architecture`;
+  `release.sh` emits `release/SHA256SUMS` for `.deb` and `.tar.gz`. Version still comes from
+  `internal/version/version.go` with the binary/source drift kill-switch intact.
+- **Session control:** `burnbox list`/`kill` added. `kill` accepts a PID, `burnbox-<pid>` or a path,
+  verifies a matching live workspace under `/dev/shm`, then sends `SIGTERM` to the orchestrator so
+  the core performs its signal-safe zeroize+rmdir scrub and emits `wiped`; stale workspaces are
+  reported for manual cleanup, never signalled blindly.
+- **Config defaults:** optional `config.toml`/`config.json` (or `$BURNBOX_CONFIG`) with `mode` and
+  `ram_mb`; missing/malformed files fall back to defaults (`online`, `512`) and CLI flags win.
+- **AppImage jail guard:** `--fs-jail` detects `/tmp/.mount_*` payloads from target/`APPDIR`/current
+  executable and falls back to overlay with a warning rather than hiding AppImage libraries with
+  a static `/usr`/`/lib` bind list. No privileged mount path was reintroduced.
+- **Seccomp/architecture audit:** libc maps `io_uring_setup/enter/register` to 425/426/427 on both
+  x86_64 and aarch64; `test_io_uring_denied_on_all_arches` asserts deny-list membership everywhere.
+- **Test hygiene:** shared-`/dev/shm` leak checks in Rust integration tests now use a baseline
+  snapshot, avoiding false failures from other agents' concurrent sessions while preserving each
+  session's own mount-point scrub assertion (honest tests invariant retained).
+- **Verification:** `./scripts/release.sh` green — fresh core flags asserted, Go tests passed,
+  versioned `.deb`/`.tar.gz` + `SHA256SUMS` produced, doctor advisory only. Documentation for
+  v1.0.2 synced across README, CHANGELOG, AGENTS and this file.
