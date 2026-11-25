@@ -9,58 +9,52 @@ BurnBox is a lightweight, zero-persistence Linux sandbox designed to protect eve
 ## Multi-Agent Workflow
 This repository is built concurrently by **OpenCode** (Rust Core & Security Agent) and **Gemini CLI** (Go Orchestrator & Integration Agent). All agents must read `AGENTS.md`, `AGREEMENT.md`, and `RESOLUTION.md` before modifying any file.
 
-## Milestone 4 — Desktop integration & packaging (shipped 2026-11-23)
-Run `./scripts/install.sh` (no sudo) to copy binaries to `~/.local/bin/` and register BurnBox as the default handler for PDFs and HTTP/HTTPS links via `xdg-mime`. Right-click any suspicious file/link in your file manager → **Open With → BurnBox**.
+## Quick Start
+```bash
+# Build
+go build -ldflags "-X burnbox/internal/version.Version=1.0.0" -o bin/burnbox ./cmd/burnbox
 
-### Milestone status
+# Run host readiness check
+./bin/burnbox doctor
+
+# Open a file offline
+./bin/burnbox open document.pdf --offline --copy-in document.pdf
+
+# Open a URL (requires slirp4netns for live fetching)
+./bin/burnbox open https://example.com
+
+# Install (zero-sudo, to ~/.local/bin/)
+./scripts/install.sh
+
+# One-command release
+./scripts/release.sh
+
+# End-to-end acceptance test
+./scripts/acceptance.sh
+```
+
+## Milestone Status (M1–M10 shipped, M11 in progress)
 - **M1** Go orchestrator MVP — shipped
 - **M2** Rust namespace + RAM zero-wipe core — shipped
 - **M3** Offline `CLONE_NEWNET` · Seccomp-BPF · `--copy-in` · smart routing · Xephyr probe — shipped
-- **M4** Desktop integration (`.desktop` + `xdg-mime`) + user-space `install.sh` — **shipped**
-- **M5** Seccomp allow-list hardening + packaging artifacts (.deb/AppImage) — next
+- **M4** Desktop integration (`.desktop` + `xdg-mime`) + user-space `install.sh` — shipped
+- **M5** Packaging artifacts (.tar.gz + .deb) + `--version` flag — shipped
+- **M6** Signal-safe scrub · `--seccomp-strict` allow-list · `burnbox doctor` — shipped
+- **M7** Release pipeline (`release.sh`) + CHANGELOG — shipped
+- **M8** Rootless networking (slirp4netns) + acceptance test (`acceptance.sh`) — shipped
+- **M9** Viewer auto-discovery (snap/native/alt-browser) + v1.0.0 — shipped
+- **M10** Tarball `bin/` layout + robust core path + desktop MIME fix + postinst root fix — shipped
+- **M11** Viewer auto-discovery hardening + acceptance.sh artifact verification — in progress
 
-## Milestone 6 — Signal-safe scrub + strict seccomp + doctor (shipped 2026-11-24)
-- **No leak on kill:** `SIGTERM`/`SIGINT`/`SIGHUP`/`SIGPIPE` now run the zeroize+rmdir scrub (self-pipe pattern), so an interrupted session never leaves `/dev/shm/burnbox-*` behind.
-- **`--seccomp-strict`:** switches the filter from the deny-list to a ~120-syscall viewer allow-list (kill-by-default); logs a GUI-compat warning to stderr.
-- **`burnbox doctor`:** rootless host self-check (AppArmor fallback, `CLONE_NEWNET`, Xephyr, seccomp, viewer-on-PATH, `/dev/shm` writable) — run it after install.
+## Known Limitations
+- **Networking in sandbox:** Unprivileged network namespaces (`CLONE_NEWNET`) cannot reach the internet without `sudo` or `slirp4netns`. Without slirp4netns, "online" mode provides loopback only. Live URL fetching requires `slirp4netns` (or `BURNBOX_SLIRP4NETNS` env var).
+- **Snap Firefox shim:** On Ubuntu hosts where `/usr/bin/firefox` is a snap wrapper, sandboxed launch fails due to snap-confine capability requirements. BurnBox auto-discovers native Firefox/Chromium ELF binaries and falls back to `xdg-open` only as last resort. Use a native Firefox/Chromium build for full GUI support.
+- **Viewer auto-discovery:** `findViewer()` probes in order: `BURNBOX_VIEWER` env override → native Firefox ELF paths → `/usr/bin/firefox` (skipped if snap shim) → native Chromium/Chrome → `xdg-open` (last resort). Snap shims are detected by reading the file header (rejects `#!` scripts and `snap-confine` wrappers).
 
-### Milestone status
-- **M1–M5** shipped
-- **M6** Signal-safe scrub · `--seccomp-strict` allow-list · `burnbox doctor` — **shipped**
-- **M7** End-to-end GUI validation + reproducible release pipeline — next
-
-## Milestone 7 — Strict seccomp validated + Release pipeline (shipped 2026-11-24)
-- **Real GUI validation:** `--seccomp-strict` allow-list proven against native Firefox/Evince (exit 0, real screenshot). Dangerous syscalls still killed.
-- **One-command release:** `./scripts/release.sh` builds, tests, packages, and runs doctor.
-- **Version consistency:** `internal/version` is the single source of truth (overridden via ldflags).
-
-### Known Limitations
-- **Networking in sandbox:** Unprivileged network namespaces (`CLONE_NEWNET`) cannot reach the internet without `sudo` or `slirp4netns`. "Online" mode currently provides loopback only. Live URL fetching is limited until rootless networking is added.
-
-### Milestone status
-- **M1–M6** shipped
-- **M7** Strict seccomp (Firefox-validated) · `release.sh` · CHANGELOG — **shipped**
-- **M8** Rootless networking (slirp4netns) + final GUI acceptance test — next
-
-## Milestone 8 — Rootless networking + acceptance (shipped 2026-11-24)
-- **Live URLs (optional):** if `slirp4netns` is on PATH (or `BURNBOX_SLIRP4NETNS` set), `--mode online` gets user-space TCP/IP inside the netns — no sudo. Without it, graceful loopback-only + warning.
-- **Strict mode proven:** `--seccomp-strict` allow-list validated against the **native** Firefox ELF (exit 0, real screenshot). `/usr/bin/firefox` is a broken snap shim on Ubuntu — see Known Limits.
-- **One-command release:** `./scripts/release.sh` (doctor advisory) + `./scripts/acceptance.sh` (3/3).
-
-### Known Limitations
-- **Snap Firefox shim:** on Ubuntu hosts where `/usr/bin/firefox` is a snap wrapper, sandboxed launch fails with rc=1 (snap-confine capability issue, not seccomp). Use a native Firefox/Chromium build, or wait for M9 viewer auto-discovery.
-
-### Milestone status
-- **M1–M7** shipped
-- **M8** slirp4netns rootless networking · strict-vs-native-Firefox proof · acceptance.sh · doctor-advisory release — **shipped**
-- **M9** Viewer auto-discovery (snap/native/alt-browser) + live Wayland/Xephyr GUI smoke test — next
-
-## Milestone 9 — Production hardening & v1.0.0 RC (shipped 2026-11-24)
-- **Security:** `--copy-in` now safely handles symlinks without following them to the host filesystem.
-- **Readiness:** `burnbox doctor` validates `slirp4netns` presence for live URL fetching.
-- **Release:** `CHANGELOG.md` updated. `release.sh` provides manual git tag instructions for the Director.
-
-### Milestone status
-- **M1–M8** shipped
-- **M9** Symlink hardening · slirp doctor check · v1.0.0 prep — **shipped**
-- **v1.0.0** Official Release Tag — *pending Director approval*
+## CLI Reference
+```
+burnbox open <file-or-url> [--offline] [--ram <mb>] [--copy-in <host_path>...] [--screenshot <path>]
+burnbox open <url> [--offline] [--ram <mb>]
+burnbox doctor
+burnbox --version
+```

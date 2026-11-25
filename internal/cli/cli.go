@@ -41,6 +41,7 @@ func handleOpen(args []string) error {
 	var offline bool
 	var ram int = 512 // default
 	var copyInPaths []string // repeatable --copy-in host paths
+	var screenshotPath string // optional --screenshot output path
 
 	// Parse flags and collect target argument (first non-flag positional arg)
 	var target string
@@ -64,6 +65,11 @@ func handleOpen(args []string) error {
 		case "--copy-in":
 			if i+1 < len(args) {
 				copyInPaths = append(copyInPaths, args[i+1])
+			}
+			i += 2
+		case "--screenshot":
+			if i+1 < len(args) {
+				screenshotPath = args[i+1]
 			}
 			i += 2
 		default:
@@ -101,8 +107,11 @@ func handleOpen(args []string) error {
 		if viewer == "" {
 			return fmt.Errorf("no suitable viewer found (firefox/chromium/xdg-open)")
 		}
-		// Shape: --target <viewer> -- --no-remote <url>
+		// Shape: --target <viewer> -- --no-remote <url> [--screenshot <path>]
 		cmdArgs = append(cmdArgs, "--target", viewer, "--", "--no-remote", target)
+		if screenshotPath != "" {
+			cmdArgs = append(cmdArgs, "--screenshot", screenshotPath)
+		}
 	} else {
 		// Local file path: use --copy-in to stage the file into the workspace
 		if len(copyInPaths) > 0 {
@@ -115,8 +124,11 @@ func handleOpen(args []string) error {
 		}
 
 		// Determine the target executable and its arguments
-		// Shape: --target xdg-open -- <basename-of-copied-in-file>
+		// Shape: --target xdg-open -- <basename-of-copied-in-file> [--screenshot <path>]
 		cmdArgs = append(cmdArgs, "--target", "xdg-open", "--", filepath.Base(target))
+		if screenshotPath != "" {
+			cmdArgs = append(cmdArgs, "--screenshot", screenshotPath)
+		}
 	}
 
 	// Find burnbox-core binary using robust lookup:
@@ -190,15 +202,81 @@ func handleOpen(args []string) error {
 }
 
 // findViewer attempts to locate a suitable graphical viewer via exec.LookPath.
+// It deliberately skips snap shim wrappers (which fail inside a sandbox due to
+// snap-confine capability requirements) and prefers native ELF viewers.
+//
+// Resolution order:
+//   1. BURNBOX_VIEWER env override
+//   2. Native Firefox ELF via known install paths
+//   3. Native chromium / chromium-browser / google-chrome
+//   4. xdg-open ONLY as last resort
 func findViewer() string {
-	// Try firefox, chromium, xdg-open in order
-	for _, name := range []string{"firefox", "chromium", "xdg-open"} {
-		path, err := exec.LookPath(name)
-		if err == nil {
+	// (a) BURNBOX_VIEWER env override
+	if v := os.Getenv("BURNBOX_VIEWER"); v != "" {
+		if isNativeELF(v) {
+			return v
+		}
+		// If the override is explicitly set but not a native ELF, still honor it
+		// (user knows what they're doing) — but warn.
+		fmt.Fprintf(os.Stderr, "warn: BURNBOX_VIEWER=%q is not a native ELF; sandboxed launch may fail\n", v)
+		return v
+	}
+
+	// (b) Native Firefox ELF via known install paths
+	firefoxPaths := []string{
+		"/snap/firefox/current/usr/lib/firefox/firefox",
+		"/usr/lib/firefox/firefox",
+		"/opt/firefox/firefox",
+	}
+	for _, p := range firefoxPaths {
+		if isNativeELF(p) {
+			return p
+		}
+	}
+
+	// Also check /usr/bin/firefox — but skip if it's a snap shim.
+	if isNativeELF("/usr/bin/firefox") {
+		return "/usr/bin/firefox"
+	}
+
+	// (c) Native chromium / chromium-browser / google-chrome
+	for _, name := range []string{"chromium", "chromium-browser", "google-chrome"} {
+		if path, err := exec.LookPath(name); err == nil && isNativeELF(path) {
 			return path
 		}
 	}
+
+	// (d) xdg-open ONLY as last resort
+	if path, err := exec.LookPath("xdg-open"); err == nil {
+		return path
+	}
+
 	return ""
+}
+
+// isNativeELF returns true if the file at path exists and is a real ELF binary
+// (not a shell script wrapper like a snap shim).
+func isNativeELF(path string) bool {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	if len(data) < 4 {
+		return false
+	}
+	// ELF magic: \x7fELF
+	if data[0] == 0x7f && data[1] == 'E' && data[2] == 'L' && data[3] == 'F' {
+		return true
+	}
+	// Also reject obvious shell-script wrappers (snap shims start with #!)
+	if len(data) >= 2 && data[0] == '#' && data[1] == '!' {
+		return false
+	}
+	// Reject snap-confine wrapper scripts
+	if len(data) >= 16 && strings.Contains(string(data[:16]), "snap-confine") {
+		return false
+	}
+	return false
 }
 
 // setupXephyrDisplay probes for Xephyr display isolation.

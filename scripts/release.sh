@@ -21,11 +21,27 @@ echo ""
 # --- Step 1: Rust build (sandbox-core) ---
 echo "=== Step 1: Building burnbox-core (Rust) ==="
 cd "$PROJECT_DIR/sandbox-core"
-cargo build --release 2>&1
+if ! cargo build --release 2>&1; then
+    echo "FATAL: sandbox-core failed to compile; refusing to package a stale engine" >&2
+    exit 1
+fi
 rm -f "$PROJECT_DIR/bin/burnbox-core"
-cp target/release/burnbox-core "$PROJECT_DIR/bin/burnbox-core"
+if ! cp target/release/burnbox-core "$PROJECT_DIR/bin/burnbox-core"; then
+    echo "FATAL: sandbox-core failed to compile; refusing to package a stale engine" >&2
+    exit 1
+fi
 cd "$PROJECT_DIR"
-echo "burnbox-core built and copied to bin/"
+
+# Assert freshness: the newly built core must expose M11 features.
+if ! "$PROJECT_DIR/bin/burnbox-core" --help 2>&1 | grep -q -- "--fs-jail"; then
+    echo "FATAL: sandbox-core failed to compile; refusing to package a stale engine" >&2
+    exit 1
+fi
+if ! "$PROJECT_DIR/bin/burnbox-core" --help 2>&1 | grep -q -- "--timeout"; then
+    echo "FATAL: sandbox-core failed to compile; refusing to package a stale engine" >&2
+    exit 1
+fi
+echo "burnbox-core built, copied to bin/, and verified fresh (--fs-jail + --timeout present)"
 echo ""
 
 # --- Step 2: Go build with version ---
