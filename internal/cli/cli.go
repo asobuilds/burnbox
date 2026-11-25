@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,8 +40,8 @@ func Execute() error {
 // Usage: burnbox open <file-or-url> [--offline] [--ram <mb>] [--copy-in <host_path> ...]
 func handleOpen(args []string) error {
 	var offline bool
-	var ram int = 512 // default
-	var copyInPaths []string // repeatable --copy-in host paths
+	var ram int = 512         // default
+	var copyInPaths []string  // repeatable --copy-in host paths
 	var screenshotPath string // optional --screenshot output path
 
 	// Parse flags and collect target argument (first non-flag positional arg)
@@ -142,20 +143,17 @@ func handleOpen(args []string) error {
 	coreCmd := exec.Command(corePath, cmdArgs...)
 	coreCmd.Env = append(os.Environ(), "DISPLAY="+display)
 
-	// Capture output to parse JSON status lines
+	// Pass burnbox-core's stdout through to the terminal so the AGREEMENT.md
+	// JSON contract (the "started" and "wiped" lines) stays visible to the
+	// user, while also capturing it for the summary below.
+	// Never re-run the core with CombinedOutput: that would create a second
+	// sandbox session and duplicate the JSON status lines.
 	var buf bytes.Buffer
-	coreCmd.Stdout = &buf
+	coreCmd.Stdout = io.MultiWriter(os.Stdout, &buf)
 	coreCmd.Stderr = os.Stderr
 	err := coreCmd.Run()
 	output := buf.String()
 
-	// If no output captured and error, try CombinedOutput
-	if err != nil && output == "" {
-		output2, err2 := coreCmd.CombinedOutput()
-		if err2 == nil || len(output2) > 0 {
-			output = string(output2)
-		}
-	}
 	if err != nil && output == "" {
 		return fmt.Errorf("burnbox-core exited")
 	}
@@ -206,10 +204,10 @@ func handleOpen(args []string) error {
 // snap-confine capability requirements) and prefers native ELF viewers.
 //
 // Resolution order:
-//   1. BURNBOX_VIEWER env override
-//   2. Native Firefox ELF via known install paths
-//   3. Native chromium / chromium-browser / google-chrome
-//   4. xdg-open ONLY as last resort
+//  1. BURNBOX_VIEWER env override
+//  2. Native Firefox ELF via known install paths
+//  3. Native chromium / chromium-browser / google-chrome
+//  4. xdg-open ONLY as last resort
 func findViewer() string {
 	// (a) BURNBOX_VIEWER env override
 	if v := os.Getenv("BURNBOX_VIEWER"); v != "" {
